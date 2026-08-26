@@ -25,9 +25,12 @@ from arena_hero import (
 
 from arena_farmer import (
     AllianceCoordinator,
+    AllianceEnemyCoreSighting,
+    AllianceEnemyUnitSighting,
     AllianceRosterClient,
     CoreRaidTarget,
     CoreFarmer,
+    EnemyCoreSighting,
     GlobalPosture,
     LifecycleMode,
     ResourceLedgerSnapshot,
@@ -35,6 +38,7 @@ from arena_farmer import (
     _emit_resource_ledger,
     _core_guard_ids,
     _core_reserve_ids,
+    _distance,
     _enemy_threat_cells,
     _is_turn_scoped_api_error,
     _manual_override_summary,
@@ -708,6 +712,197 @@ class AllianceCoordinatorTests(unittest.TestCase):
             )
 
             self.assertEqual(coordinator.peers(now=100), ())
+
+    def test_two_accounts_share_enemy_core_sightings_and_armada_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            enemy_id = UUID("10000000-0000-4000-8000-000000000099")
+            coordinator_2 = AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            )
+            coordinator_2.publish(
+                make_turn(tick=100, core_identifier=ALLY_CORE_ID),
+                enemy_cores=[
+                    AllianceEnemyCoreSighting(
+                        core_id=enemy_id,
+                        position=(64, 64),
+                        owner_username="nemesis",
+                        last_tick=100,
+                        observations=2,
+                    )
+                ],
+                enemy_units=[
+                    AllianceEnemyUnitSighting(
+                        unit_id=UUID(ENEMY_1),
+                        position=(12, 10),
+                        unit_type=UnitType.RANGER,
+                        last_tick=100,
+                    )
+                ],
+                obstacles={(11, 10), (11, 11)},
+                armada_anchor=(10, 10),
+                armada_target=(64, 64),
+                revenge_usernames=["nemesis"],
+            )
+
+            turn = make_turn(tick=100)
+            tactic = CoreFarmer(
+                alliance_coordinator=AllianceCoordinator(
+                    shared,
+                    alliance_id="duo",
+                    account_id="account-1",
+                    expected_members=2,
+                    barrier_timeout_seconds=0,
+                )
+            )
+            tactic._refresh_alliance(turn)
+
+            self.assertIn(enemy_id, tactic.stationary_core_memory)
+            self.assertEqual(tactic.stationary_core_memory[enemy_id].position, (64, 64))
+            self.assertIn("nemesis", tactic.revenge_usernames)
+            self.assertEqual(
+                tactic.alliance_enemy_units[UUID(ENEMY_1)].position,
+                (12, 10),
+            )
+            self.assertTrue({(11, 10), (11, 11)} <= tactic.known_obstacles)
+
+    def test_armada_sweep_target_prioritizes_enemy_cores_and_concentric_rings(self) -> None:
+        tactic = CoreFarmer()
+        turn = make_turn(tick=100, core_position=(0, 0))
+
+        # Default without sightings targets center/Ring 0
+        default_target = tactic._armada_sweep_target(turn)
+        self.assertIn(default_target, {(16, 16), (-16, 16), (16, -16), (-16, -16)})
+
+        # With an enemy core sighting in chunk (2, 2), immediately prioritizes chunk (2, 2)
+        enemy_id = UUID("10000000-0000-4000-8000-000000000099")
+        tactic.stationary_core_memory[enemy_id] = EnemyCoreSighting(
+            position=(80, 80),
+            first_tick=100,
+            last_tick=100,
+            observations=1,
+        )
+        sweep_target = tactic._armada_sweep_target(turn)
+        self.assertEqual(sweep_target, (80, 80))
+
+    def test_armada_sweep_frontier_expands_beyond_original_box(self) -> None:
+        tactic = CoreFarmer()
+        turn = make_turn(tick=100, core_position=(0, 0))
+        tactic.scout_chunk_last_seen = {
+            (cx, cy): 100
+            for cx in range(-4, 4)
+            for cy in range(-4, 4)
+        }
+
+        target = tactic._armada_sweep_target(turn)
+
+        chunk = (target[0] // 32, target[1] // 32)
+        self.assertTrue(chunk[0] in {-5, 4} or chunk[1] in {-5, 4})
+
+    def test_armada_uses_column_when_obstacles_fill_forward_footprint(self) -> None:
+        tactic = CoreFarmer()
+        tactic.known_obstacles.update({(1, -1), (1, 0), (1, 1), (2, 0)})
+        turn = make_turn(tick=100, core_position=(0, 0))
+
+        mode = tactic._armada_formation_mode(turn, (0, 0), (20, 0))
+
+        self.assertEqual(mode, "COLUMN")
+
+    def test_mature_account_assigns_only_two_empty_worker_probes(self) -> None:
+        workers = [
+            unit(
+                f"00000000-0000-4000-8000-{200 + i:012x}",
+                "WORKER",
+                (i, 0),
+                cargo=0,
+            )
+            for i in range(18)
+        ]
+        turn = make_turn(tick=100, core_position=(0, 0), units=workers)
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+        tactic.armada_gathered = True
+
+        tactic._refresh_armada_probes(turn, excluded_ids=set())
+
+        self.assertEqual(len(tactic.armada_probe_ids), 2)
+        self.assertEqual(set(tactic.armada_probe_slots), tactic.armada_probe_ids)
+
+    def test_armada_formation_positions_vanguards_front_and_rangers_back(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (0, i))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, -i))
+            for i in range(1, 7)
+        ]
+        turn = make_turn(tick=100, core_position=(0, 0), units=vanguard_dicts + ranger_dicts)
+
+        strategic_target = (50, 0)  # East
+        v_target = tactic._combat_patrol_target(
+            turn,
+            turn.vanguards[5],
+            5,
+            strategic_target=strategic_target,
+        )
+        r_target = tactic._combat_patrol_target(
+            turn,
+            turn.rangers[5],
+            5,
+            strategic_target=strategic_target,
+        )
+
+        # Vanguard frontline advances ahead towards strategic_target (x > 0)
+        self.assertGreater(v_target[0], r_target[0])
+
+    def test_armada_preserves_base_guards_while_sweeping(self) -> None:
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (i, 0))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, i))
+            for i in range(1, 7)
+        ]
+        turn = make_turn(tick=100, core_position=(0, 0), units=vanguard_dicts + ranger_dicts)
+        guards = _core_guard_ids(turn)
+
+        # 2 Vanguard guards and 2 Ranger guards
+        self.assertEqual(len(guards[0]), 2)
+        self.assertEqual(len(guards[1]), 2)
+        # Guards are the nearest units to Core (0, 0)
+        for guard_id in guards[0]:
+            unit_obj = next(u for u in turn.vanguards if u.id == guard_id)
+            self.assertLessEqual(_distance((0, 0), unit_obj.position), 2)
+
+    def test_armada_rallies_at_core_before_sweeping(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        # Distant units far from core (50, 50)
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (50 + i, 50))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (50, 50 + i))
+            for i in range(1, 7)
+        ]
+        turn = make_turn(tick=100, core_position=(0, 0), units=vanguard_dicts + ranger_dicts)
+
+        strategic_target = (100, 100)
+        # When units are distant from core, patrol target directs them towards core to gather
+        target = tactic._combat_patrol_target(
+            turn,
+            turn.vanguards[5],
+            5,
+            strategic_target=strategic_target,
+        )
+        self.assertEqual(target, (0, 0))
+        self.assertFalse(tactic.armada_gathered)
 
 
 class ResourceLedgerTests(unittest.TestCase):

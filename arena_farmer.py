@@ -231,6 +231,17 @@ SCOUT_RING_STEP = 10
 SCOUT_RING_COUNT = 4
 SCOUT_COVERAGE_MEMORY_TTL = 4096
 ALLIANCE_SCOUT_CHUNK_LIMIT = 4096
+ALLIANCE_ENEMY_CORE_LIMIT = 16
+ALLIANCE_ENEMY_UNIT_LIMIT = 64
+ALLIANCE_OBSTACLE_LIMIT = 8192
+ARMADA_FORMATION_FRONT_OFFSET = 2
+ARMADA_FORMATION_BACK_OFFSET = 1
+ARMADA_CHUNK_SWEEP_RADIUS = 8
+ARMADA_PROBES_PER_ACCOUNT = 2
+ARMADA_PROBE_MIN_WORKERS = BASE_WORKER_TARGET + 1
+ARMADA_PROBE_FORWARD_OFFSET = 3
+ARMADA_PROBE_LATERAL_OFFSET = 4
+ARMADA_CONTACT_RADIUS = 8
 
 Position = tuple[int, int]
 
@@ -361,6 +372,32 @@ class AllianceDefenseRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class AllianceEnemyCoreSighting:
+    core_id: UUID
+    position: Position
+    owner_username: str = ""
+    last_tick: int = 0
+    observations: int = 1
+
+
+@dataclass(slots=True, frozen=True)
+class AllianceEnemyUnitSighting:
+    unit_id: UUID
+    position: Position
+    unit_type: UnitType
+    last_tick: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class AllianceUnitSnapshot:
+    unit_id: UUID
+    position: Position
+    unit_type: UnitType
+    hp: int = 0
+    cargo: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class AlliancePeer:
     account_id: str
     alliance_id: str
@@ -371,9 +408,131 @@ class AlliancePeer:
     core_position: Position | None
     unit_ids: frozenset[UUID]
     unit_positions: frozenset[Position]
+    units: tuple[AllianceUnitSnapshot, ...]
     scout_chunks: tuple[tuple[Position, int], ...]
     updated_at: float
     defense: AllianceDefenseRequest | None = None
+    enemy_cores: tuple[AllianceEnemyCoreSighting, ...] = ()
+    armada_anchor: Position | None = None
+    armada_target: Position | None = None
+    revenge_usernames: frozenset[str] = frozenset()
+    armada_gathered: bool = False
+    enemy_units: tuple[AllianceEnemyUnitSighting, ...] = ()
+    obstacles: frozenset[Position] = frozenset()
+
+
+def _parse_alliance_units(value: object) -> tuple[AllianceUnitSnapshot, ...]:
+    if not isinstance(value, list):
+        return ()
+    units: list[AllianceUnitSnapshot] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        raw_position = item.get("position")
+        try:
+            if not isinstance(raw_position, list) or len(raw_position) != 2:
+                continue
+            position = (int(raw_position[0]), int(raw_position[1]))
+            unit_type = UnitType(str(item.get("unit_type")))
+            if not _is_signed_int64_position(position):
+                continue
+            units.append(
+                AllianceUnitSnapshot(
+                    unit_id=UUID(str(item.get("id"))),
+                    position=position,
+                    unit_type=unit_type,
+                    hp=max(0, int(item.get("hp", 0))),
+                    cargo=max(0, int(item.get("cargo", 0))),
+                )
+            )
+        except (ValueError, TypeError):
+            continue
+    return tuple(units)
+
+
+def _parse_alliance_enemy_units(
+    value: object,
+) -> tuple[AllianceEnemyUnitSighting, ...]:
+    if not isinstance(value, list):
+        return ()
+    sightings: list[AllianceEnemyUnitSighting] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        raw_position = item.get("pos")
+        try:
+            if not isinstance(raw_position, list) or len(raw_position) != 2:
+                continue
+            position = (int(raw_position[0]), int(raw_position[1]))
+            unit_type = UnitType(str(item.get("type")))
+            if unit_type not in {UnitType.VANGUARD, UnitType.RANGER}:
+                continue
+            if not _is_signed_int64_position(position):
+                continue
+            sightings.append(
+                AllianceEnemyUnitSighting(
+                    unit_id=UUID(str(item.get("id"))),
+                    position=position,
+                    unit_type=unit_type,
+                    last_tick=max(0, int(item.get("tick", 0))),
+                )
+            )
+        except (ValueError, TypeError):
+            continue
+        if len(sightings) >= ALLIANCE_ENEMY_UNIT_LIMIT:
+            break
+    return tuple(sightings)
+
+
+def _parse_alliance_positions(value: object, limit: int) -> frozenset[Position]:
+    if not isinstance(value, list) or len(value) > limit:
+        return frozenset()
+    positions: set[Position] = set()
+    for item in value:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and not any(isinstance(coordinate, bool) for coordinate in item)
+            and all(isinstance(coordinate, int) for coordinate in item)
+            and _is_signed_int64_position((item[0], item[1]))
+        ):
+            positions.add((item[0], item[1]))
+    return frozenset(positions)
+
+
+def _parse_alliance_enemy_cores(value: object) -> tuple[AllianceEnemyCoreSighting, ...]:
+    if not isinstance(value, list):
+        return ()
+    sightings: list[AllianceEnemyCoreSighting] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        core_id_raw = item.get("id")
+        pos_raw = item.get("pos")
+        if not core_id_raw or not isinstance(pos_raw, list) or len(pos_raw) != 2:
+            continue
+        try:
+            core_id = UUID(str(core_id_raw))
+            pos = (int(pos_raw[0]), int(pos_raw[1]))
+            if not _is_signed_int64_position(pos):
+                continue
+            username = str(item.get("username", ""))[:64]
+            last_tick = max(0, int(item.get("tick", 0)))
+            obs = max(1, int(item.get("obs", 1)))
+            sightings.append(
+                AllianceEnemyCoreSighting(
+                    core_id=core_id,
+                    position=pos,
+                    owner_username=username,
+                    last_tick=last_tick,
+                    observations=obs,
+                )
+            )
+        except (ValueError, TypeError):
+            continue
+        if len(sightings) >= ALLIANCE_ENEMY_CORE_LIMIT:
+            break
+    return tuple(sightings)
 
 
 def _parse_alliance_defense(value: object) -> AllianceDefenseRequest | None:
@@ -586,6 +745,13 @@ class AllianceCoordinator:
         *,
         scout_chunks: Mapping[Position, int] | None = None,
         defense: AllianceDefenseRequest | None = None,
+        enemy_cores: Sequence[AllianceEnemyCoreSighting] | None = None,
+        enemy_units: Sequence[AllianceEnemyUnitSighting] | None = None,
+        obstacles: Iterable[Position] | None = None,
+        armada_anchor: Position | None = None,
+        armada_target: Position | None = None,
+        revenge_usernames: Sequence[str] | None = None,
+        armada_gathered: bool = False,
     ) -> None:
         core = turn.core
         recent_scout_chunks = sorted(
@@ -632,6 +798,40 @@ class AllianceCoordinator:
                     [cell[0], cell[1]] for cell in defense.threat_cells
                 ],
             }
+        if enemy_cores:
+            state["enemy_cores"] = [
+                {
+                    "id": str(sighting.core_id),
+                    "pos": [sighting.position[0], sighting.position[1]],
+                    "username": sighting.owner_username,
+                    "tick": sighting.last_tick,
+                    "obs": sighting.observations,
+                }
+                for sighting in enemy_cores[:ALLIANCE_ENEMY_CORE_LIMIT]
+            ]
+        if enemy_units:
+            state["enemy_units"] = [
+                {
+                    "id": str(sighting.unit_id),
+                    "pos": [sighting.position[0], sighting.position[1]],
+                    "type": sighting.unit_type.value,
+                    "tick": sighting.last_tick,
+                }
+                for sighting in enemy_units[:ALLIANCE_ENEMY_UNIT_LIMIT]
+            ]
+        if obstacles:
+            state["obstacles"] = [
+                [position[0], position[1]]
+                for position in sorted(obstacles)[:ALLIANCE_OBSTACLE_LIMIT]
+            ]
+        if armada_anchor is not None:
+            state["armada_anchor"] = [armada_anchor[0], armada_anchor[1]]
+        if armada_target is not None:
+            state["armada_target"] = [armada_target[0], armada_target[1]]
+        if revenge_usernames:
+            state["revenge_usernames"] = list(revenge_usernames)[:32]
+        if armada_gathered:
+            state["armada_gathered"] = True
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.directory / (
             f".{self.account_id}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -695,6 +895,36 @@ class AllianceCoordinator:
                     ):
                         raise ValueError("alliance scout chunk is invalid")
                     scout_chunks.append(((value[0], value[1]), value[2]))
+                anchor_raw = raw.get("armada_anchor")
+                armada_anchor = (
+                    (int(anchor_raw[0]), int(anchor_raw[1]))
+                    if isinstance(anchor_raw, list)
+                    and len(anchor_raw) == 2
+                    and not any(isinstance(item, bool) for item in anchor_raw)
+                    and all(isinstance(item, int) for item in anchor_raw)
+                    and _is_signed_int64_position((anchor_raw[0], anchor_raw[1]))
+                    else None
+                )
+                target_raw = raw.get("armada_target")
+                armada_target = (
+                    (int(target_raw[0]), int(target_raw[1]))
+                    if isinstance(target_raw, list)
+                    and len(target_raw) == 2
+                    and not any(isinstance(item, bool) for item in target_raw)
+                    and all(isinstance(item, int) for item in target_raw)
+                    and _is_signed_int64_position((target_raw[0], target_raw[1]))
+                    else None
+                )
+                raw_rev = raw.get("revenge_usernames", ())
+                revenge_names = (
+                    frozenset(
+                        str(name).casefold()
+                        for name in raw_rev
+                        if isinstance(name, str) and name
+                    )
+                    if isinstance(raw_rev, (list, tuple))
+                    else frozenset()
+                )
                 peers.append(
                     AlliancePeer(
                         account_id=account_id,
@@ -710,9 +940,22 @@ class AllianceCoordinator:
                             for value in raw.get("unit_positions", ())
                             if isinstance(value, list) and len(value) == 2
                         ),
+                        units=_parse_alliance_units(raw.get("units")),
                         scout_chunks=tuple(scout_chunks),
                         updated_at=updated_at,
                         defense=_parse_alliance_defense(raw.get("defense")),
+                        enemy_cores=_parse_alliance_enemy_cores(raw.get("enemy_cores")),
+                        armada_anchor=armada_anchor,
+                        armada_target=armada_target,
+                        revenge_usernames=revenge_names,
+                        armada_gathered=bool(raw.get("armada_gathered", False)),
+                        enemy_units=_parse_alliance_enemy_units(
+                            raw.get("enemy_units")
+                        ),
+                        obstacles=_parse_alliance_positions(
+                            raw.get("obstacles"),
+                            ALLIANCE_OBSTACLE_LIMIT,
+                        ),
                     )
                 )
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -2274,6 +2517,14 @@ class CoreFarmer:
         self.expedition_members: dict[int, set[UUID]] = {}
         self.revenge_usernames: set[str] = set()
         self.manual_core_order_active = False
+        self.armada_target_position: Position | None = None
+        self.armada_anchor_position: Position | None = None
+        self.armada_sweep_chunk: Position | None = None
+        self.armada_gathered: bool = False
+        self.armada_mode = "GATHER"
+        self.armada_probe_ids: set[UUID] = set()
+        self.armada_probe_slots: dict[UUID, int] = {}
+        self.alliance_enemy_units: dict[UUID, AllianceEnemyUnitSighting] = {}
 
     def _refresh_alliance(self, turn: Turn) -> None:
         coordinator = self.alliance_coordinator
@@ -2285,6 +2536,41 @@ class CoreFarmer:
                     if coordinator.expected_members > 1
                     else None
                 )
+                enemy_cores_to_share = (
+                    [
+                        AllianceEnemyCoreSighting(
+                            core_id=core_id,
+                            position=sighting.position,
+                            owner_username=getattr(sighting, "owner_username", ""),
+                            last_tick=sighting.last_tick,
+                            observations=sighting.observations,
+                        )
+                        for core_id, sighting in self.stationary_core_memory.items()
+                        if core_id not in self.allied_object_ids
+                        and sighting.position not in self.allied_occupied_cells
+                    ]
+                    if coordinator.expected_members > 1
+                    else None
+                )
+                enemy_units_to_share = (
+                    [
+                        AllianceEnemyUnitSighting(
+                            unit_id=enemy.id,
+                            position=enemy.position,
+                            unit_type=enemy.unit_type,
+                            last_tick=turn.tick,
+                        )
+                        for enemy in turn.visible_enemies
+                        if getattr(enemy, "kind", None) != "CORE"
+                        and getattr(enemy, "unit_type", None)
+                        in {UnitType.VANGUARD, UnitType.RANGER}
+                        and enemy.id not in self.allied_object_ids
+                        and getattr(enemy, "owner_username", "")
+                        not in self.allied_usernames
+                    ]
+                    if coordinator.expected_members > 1
+                    else None
+                )
                 coordinator.publish(
                     turn,
                     scout_chunks=(
@@ -2293,6 +2579,29 @@ class CoreFarmer:
                         else None
                     ),
                     defense=defense,
+                    enemy_cores=enemy_cores_to_share,
+                    enemy_units=enemy_units_to_share,
+                    obstacles=(
+                        self.known_obstacles | set(turn.obstacle_cells)
+                        if coordinator.expected_members > 1
+                        else None
+                    ),
+                    armada_anchor=(
+                        self.armada_anchor_position
+                        if coordinator.expected_members > 1
+                        else None
+                    ),
+                    armada_target=(
+                        self.armada_target_position
+                        if coordinator.expected_members > 1
+                        else None
+                    ),
+                    revenge_usernames=(
+                        tuple(self.revenge_usernames)
+                        if coordinator.expected_members > 1
+                        else None
+                    ),
+                    armada_gathered=self.armada_gathered,
                 )
                 deadline = time.monotonic() + coordinator.barrier_timeout_seconds
                 while True:
@@ -2339,6 +2648,8 @@ class CoreFarmer:
                         shared_tick,
                         self.scout_chunk_last_seen.get(chunk, -1),
                     )
+                if peer.account_id != coordinator.account_id:
+                    self.known_obstacles.update(peer.obstacles)
         local_object_ids = {
             identifier
             for peer in peers
@@ -2436,6 +2747,56 @@ class CoreFarmer:
             if identifier not in self.allied_object_ids
             and threat.position not in self.allied_occupied_cells
         }
+        if coordinator is not None and coordinator.expected_members > 1:
+            shared_enemy_units: dict[UUID, AllianceEnemyUnitSighting] = {}
+            for peer in peers:
+                if peer.account_id == coordinator.account_id:
+                    continue
+                for core_sighting in peer.enemy_cores:
+                    if (
+                        core_sighting.core_id in self.allied_object_ids
+                        or core_sighting.position in self.allied_occupied_cells
+                        or (
+                            core_sighting.owner_username
+                            and core_sighting.owner_username in self.allied_usernames
+                        )
+                    ):
+                        continue
+                    existing = self.stationary_core_memory.get(core_sighting.core_id)
+                    if existing is None or core_sighting.last_tick > existing.last_tick:
+                        self.stationary_core_memory[core_sighting.core_id] = EnemyCoreSighting(
+                            position=core_sighting.position,
+                            first_tick=(
+                                existing.first_tick
+                                if existing is not None
+                                else core_sighting.last_tick
+                            ),
+                            last_tick=min(core_sighting.last_tick, turn.tick),
+                            observations=max(
+                                core_sighting.observations,
+                                existing.observations if existing is not None else 1,
+                            ),
+                        )
+                for rev_name in peer.revenge_usernames:
+                    if rev_name.casefold() not in self.allied_usernames:
+                        self.revenge_usernames.add(rev_name.casefold())
+                for unit_sighting in peer.enemy_units:
+                    if (
+                        unit_sighting.unit_id in self.allied_object_ids
+                        or unit_sighting.position in self.allied_occupied_cells
+                        or turn.tick - unit_sighting.last_tick
+                        > CORE_VISIBILITY_GAP_TICKS
+                    ):
+                        continue
+                    existing = shared_enemy_units.get(unit_sighting.unit_id)
+                    if (
+                        existing is None
+                        or unit_sighting.last_tick > existing.last_tick
+                    ):
+                        shared_enemy_units[unit_sighting.unit_id] = unit_sighting
+            self.alliance_enemy_units = shared_enemy_units
+        else:
+            self.alliance_enemy_units.clear()
         isolated_sighting = self.stationary_core_memory.get(
             self.isolated_core_target_id
         )
@@ -4578,8 +4939,10 @@ class CoreFarmer:
             for worker in all_workers
             if worker.id not in self.worker_conversion_ids
         ]
-        for worker in workers:
-            self.scout_chunk_last_seen[_chunk_coordinates(worker.position)] = turn.tick
+        for controlled_unit in turn.units:
+            self.scout_chunk_last_seen[
+                _chunk_coordinates(controlled_unit.position)
+            ] = turn.tick
         for chunk, last_seen in tuple(self.scout_chunk_last_seen.items()):
             if turn.tick - last_seen > SCOUT_COVERAGE_MEMORY_TTL:
                 self.scout_chunk_last_seen.pop(chunk, None)
@@ -4629,8 +4992,22 @@ class CoreFarmer:
             if observer_position is not None
             else None
         )
+        self._refresh_armada_probes(
+            turn,
+            excluded_ids=(
+                set(self.worker_conversion_ids)
+                | ({observer_id} if observer_id is not None else set())
+            ),
+        )
+        probe_target = (
+            combat_target.position
+            if combat_target is not None
+            else self._armada_strategic_target(turn)
+        )
         economic_empty_workers = [
-            worker for worker in empty_workers if worker.id != observer_id
+            worker
+            for worker in empty_workers
+            if worker.id != observer_id and worker.id not in self.armada_probe_ids
         ]
         preplanned_units = _queue_core_defender_egress(
             turn,
@@ -4703,6 +5080,14 @@ class CoreFarmer:
                 if _distance(worker.position, core.position) > SCOUT_SAFE_RETURN_RADIUS:
                     self.scout_return_ids.add(worker.id)
                 self._set_worker_mode(worker, "EVADE", core.position)
+                continue
+            if worker.id in self.armada_probe_ids:
+                self._control_armada_probe(
+                    turn,
+                    worker,
+                    probe_target,
+                    context,
+                )
                 continue
             if (
                 self.recovery_mode
@@ -4804,6 +5189,14 @@ class CoreFarmer:
                 if _distance(worker.position, core.position) > SCOUT_SAFE_RETURN_RADIUS:
                     self.scout_return_ids.add(worker.id)
                 self._set_worker_mode(worker, "EVADE", core.position)
+                continue
+            if worker.id in self.armada_probe_ids:
+                self._control_armada_probe(
+                    turn,
+                    worker,
+                    probe_target,
+                    context,
+                )
                 continue
             if worker.id == observer_id and observer_position is not None:
                 self._control_core_observer(
@@ -5123,25 +5516,543 @@ class CoreFarmer:
             ),
         ).id
 
+    def _armada_sweep_target(self, turn: Turn) -> Position:
+        core = turn.core
+        core_pos = self.armada_anchor_position or (
+            core.position if core is not None else (0, 0)
+        )
+
+        # Every visited chunk contributes its surrounding frontier.  Unlike the
+        # old fixed 8x8 box, this grows for as long as the alliance keeps moving.
+        candidate_chunks: set[Position] = {(-1, -1), (-1, 0), (0, -1), (0, 0)}
+        for chunk in self.scout_chunk_last_seen:
+            cx, cy = chunk
+            candidate_chunks.add(chunk)
+            candidate_chunks.update(
+                {
+                    (cx - 1, cy),
+                    (cx + 1, cy),
+                    (cx, cy - 1),
+                    (cx, cy + 1),
+                }
+            )
+        candidate_chunks.update(
+            _chunk_coordinates(sighting.position)
+            for sighting in self.stationary_core_memory.values()
+        )
+
+        def chunk_score(chunk: Position) -> tuple[int, int, int]:
+            cx, cy = chunk
+            chunk_center = (cx * 32 + 16, cy * 32 + 16)
+            has_enemy_core = any(
+                (
+                    sighting.position[0] // 32 == cx
+                    and sighting.position[1] // 32 == cy
+                )
+                for sighting in self.stationary_core_memory.values()
+            )
+            last_seen = self.scout_chunk_last_seen.get(chunk, -10000)
+            age = turn.tick - last_seen
+            dist = _distance(core_pos, chunk_center)
+            return (
+                0 if has_enemy_core else 1,
+                -age,
+                dist,
+            )
+
+        best_chunk = min(candidate_chunks, key=chunk_score)
+        self.armada_sweep_chunk = best_chunk
+        cx, cy = best_chunk
+        return (cx * 32 + 16, cy * 32 + 16)
+
+    def _armada_strategic_target(
+        self,
+        turn: Turn,
+        isolated_core_target: object | None = None,
+        stationary_unit_target: object | None = None,
+    ) -> Position:
+        if isolated_core_target is not None:
+            return isolated_core_target.position
+        if stationary_unit_target is not None:
+            return stationary_unit_target.position
+        if self.isolated_core_target_id:
+            sighting = self.stationary_core_memory.get(self.isolated_core_target_id)
+            if sighting is not None:
+                return sighting.position
+        if self.stationary_unit_target_id:
+            unit_sighting = self.enemy_unit_sightings.get(self.stationary_unit_target_id)
+            if unit_sighting is not None:
+                return unit_sighting.position
+        coordinator = self.alliance_coordinator
+        leader = self.alliance_leader
+        if (
+            coordinator is not None
+            and coordinator.expected_members > 1
+            and leader is not None
+            and leader.account_id != coordinator.account_id
+            and leader.armada_gathered
+            and leader.armada_target is not None
+            and leader.armada_target != leader.core_position
+        ):
+            return leader.armada_target
+        fresh_shared_units = [
+            sighting
+            for sighting in self.alliance_enemy_units.values()
+            if turn.tick - sighting.last_tick <= CORE_VISIBILITY_GAP_TICKS
+        ]
+        if fresh_shared_units:
+            origin = self.armada_anchor_position or (
+                turn.core.position if turn.core is not None else (0, 0)
+            )
+            return min(
+                fresh_shared_units,
+                key=lambda sighting: (
+                    0 if sighting.unit_type is UnitType.RANGER else 1,
+                    _distance(origin, sighting.position),
+                    sighting.unit_id.bytes,
+                ),
+            ).position
+        hostiles = self._hostile_enemies(turn)
+        if hostiles:
+            core_pos = turn.core.position if turn.core is not None else (0, 0)
+            nearest_hostile = min(
+                hostiles,
+                key=lambda enemy: (
+                    0
+                    if str(getattr(enemy, "owner_username", "")).casefold()
+                    in self.revenge_usernames
+                    else 1,
+                    _distance(core_pos, enemy.position),
+                    _uuid_sort_key(enemy),
+                ),
+            )
+            return nearest_hostile.position
+        if (
+            self.beacon_policy == "pursue"
+            and len(turn.units) >= 20
+            and turn.core is not None
+            and turn.beacon.carrier_id != turn.core.id
+        ):
+            return turn.beacon.position
+        return self._armada_sweep_target(turn)
+
+    @staticmethod
+    def _peer_armada_units(peer: AlliancePeer) -> tuple[AllianceUnitSnapshot, ...]:
+        selected: list[AllianceUnitSnapshot] = []
+        for unit_type in (UnitType.VANGUARD, UnitType.RANGER):
+            typed = sorted(
+                (unit for unit in peer.units if unit.unit_type is unit_type),
+                key=lambda unit: (
+                    _distance(
+                        unit.position,
+                        peer.core_position or unit.position,
+                    ),
+                    unit.unit_id.bytes,
+                ),
+            )
+            guard_count = 2 if len(typed) >= MATURE_GUARD_FLEET_MIN else min(1, len(typed))
+            selected.extend(typed[guard_count:])
+        return tuple(selected)
+
+    def _alliance_armada_snapshots(
+        self,
+        turn: Turn,
+        local_units: Sequence[object],
+    ) -> tuple[AllianceUnitSnapshot, ...]:
+        snapshots = [
+            AllianceUnitSnapshot(
+                unit_id=unit.id,
+                position=unit.position,
+                unit_type=unit.unit_type,
+                hp=getattr(unit, "hp", 0),
+            )
+            for unit in local_units
+        ]
+        coordinator = self.alliance_coordinator
+        if coordinator is not None and coordinator.expected_members > 1:
+            for peer in self.alliance_peers:
+                if peer.account_id != coordinator.account_id and peer.tick >= turn.tick:
+                    snapshots.extend(self._peer_armada_units(peer))
+        by_id = {snapshot.unit_id: snapshot for snapshot in snapshots}
+        return tuple(sorted(by_id.values(), key=lambda unit: unit.unit_id.bytes))
+
+    @staticmethod
+    def _armada_centroid(units: Sequence[AllianceUnitSnapshot]) -> Position:
+        return (
+            round(sum(unit.position[0] for unit in units) / len(units)),
+            round(sum(unit.position[1] for unit in units) / len(units)),
+        )
+
+    def _armada_formation_mode(
+        self,
+        turn: Turn,
+        anchor: Position,
+        target: Position,
+    ) -> str:
+        if any(
+            sighting.position == target
+            for sighting in self.stationary_core_memory.values()
+        ) and _distance(anchor, target) <= 8:
+            return "SIEGE"
+        if any(
+            _distance(anchor, sighting.position) <= ARMADA_CONTACT_RADIUS
+            for sighting in self.alliance_enemy_units.values()
+            if turn.tick - sighting.last_tick <= CORE_VISIBILITY_GAP_TICKS
+        ) or any(
+            getattr(enemy, "kind", None) != "CORE"
+            and _distance(anchor, enemy.position) <= ARMADA_CONTACT_RADIUS
+            for enemy in self._hostile_enemies(turn)
+        ):
+            return "CONTACT"
+
+        dx = (target[0] > anchor[0]) - (target[0] < anchor[0])
+        dy = (target[1] > anchor[1]) - (target[1] < anchor[1])
+        px, py = -dy, dx
+        forward_cells = {
+            (anchor[0] + dx * step + px * lateral,
+             anchor[1] + dy * step + py * lateral)
+            for step in range(1, 5)
+            for lateral in range(-2, 3)
+        }
+        blocked = sum(cell in self.known_obstacles for cell in forward_cells)
+        return "COLUMN" if blocked >= 4 else "SEARCH"
+
+    def _legal_formation_target(
+        self,
+        desired: Position,
+        fallback: Position,
+    ) -> Position:
+        if desired not in self.known_obstacles and desired not in self.allied_occupied_cells:
+            return desired
+        candidates = [
+            (desired[0] + dx, desired[1] + dy)
+            for radius in range(1, 4)
+            for dx in range(-radius, radius + 1)
+            for dy in range(-radius, radius + 1)
+            if abs(dx) + abs(dy) == radius
+        ]
+        return min(
+            (
+                cell
+                for cell in candidates
+                if cell not in self.known_obstacles
+                and cell not in self.allied_occupied_cells
+                and _is_signed_int64_position(cell)
+            ),
+            key=lambda cell: (_distance(cell, desired), _distance(cell, fallback), cell),
+            default=fallback,
+        )
+
+    @staticmethod
+    def _probe_count(worker_count: int) -> int:
+        if worker_count < ARMADA_PROBE_MIN_WORKERS:
+            return 0
+        return 2 if worker_count >= DEFAULT_WORKER_TARGET else 1
+
+    def _refresh_armada_probes(
+        self,
+        turn: Turn,
+        *,
+        excluded_ids: set[UUID],
+    ) -> None:
+        if not self.armada_gathered:
+            self.armada_probe_ids.clear()
+            self.armada_probe_slots.clear()
+            return
+
+        local_eligible = sorted(
+            (
+                worker
+                for worker in turn.workers
+                if worker.cargo == 0 and worker.id not in excluded_ids
+            ),
+            key=_uuid_sort_key,
+        )
+        selected_ids = [
+            worker.id
+            for worker in local_eligible[: self._probe_count(len(turn.workers))]
+        ]
+        all_selected_ids = list(selected_ids)
+        coordinator = self.alliance_coordinator
+        if coordinator is not None and coordinator.expected_members > 1:
+            for peer in self.alliance_peers:
+                if peer.account_id == coordinator.account_id or peer.tick < turn.tick:
+                    continue
+                peer_workers = sorted(
+                    (
+                        unit
+                        for unit in peer.units
+                        if unit.unit_type is UnitType.WORKER and unit.cargo == 0
+                    ),
+                    key=lambda unit: unit.unit_id.bytes,
+                )
+                all_selected_ids.extend(
+                    unit.unit_id
+                    for unit in peer_workers[
+                        : self._probe_count(
+                            sum(
+                                unit.unit_type is UnitType.WORKER
+                                for unit in peer.units
+                            )
+                        )
+                    ]
+                )
+
+        ordered_ids = sorted(set(all_selected_ids), key=lambda unit_id: unit_id.bytes)
+        self.armada_probe_ids = set(selected_ids)
+        self.armada_probe_slots = {
+            unit_id: slot for slot, unit_id in enumerate(ordered_ids[:4])
+        }
+        self.armada_probe_ids.intersection_update(self.armada_probe_slots)
+
+    def _control_armada_probe(
+        self,
+        turn: Turn,
+        worker: object,
+        target: Position,
+        context: MovementContext,
+    ) -> None:
+        anchor = self.armada_anchor_position or turn.core.position
+        fresh_threats = [
+            sighting
+            for sighting in self.alliance_enemy_units.values()
+            if turn.tick - sighting.last_tick <= CORE_VISIBILITY_GAP_TICKS
+        ]
+        threatened = any(
+            _distance(worker.position, sighting.position)
+            <= (4 if sighting.unit_type is UnitType.RANGER else 2)
+            for sighting in fresh_threats
+        )
+        if threatened or self.armada_mode in {"CONTACT", "SIEGE"}:
+            moved = _queue_toward(
+                worker,
+                anchor,
+                context,
+                avoid_danger=False,
+                target_radius=2,
+            )
+            if not moved:
+                worker.wait()
+            self._set_worker_mode(
+                worker,
+                "ARMADA_PROBE_RETREAT",
+                anchor,
+            )
+            return
+
+        dx = (target[0] > anchor[0]) - (target[0] < anchor[0])
+        dy = (target[1] > anchor[1]) - (target[1] < anchor[1])
+        px, py = -dy, dx
+        slot = self.armada_probe_slots.get(worker.id, 0)
+        offsets = (
+            (ARMADA_PROBE_FORWARD_OFFSET, -ARMADA_PROBE_LATERAL_OFFSET),
+            (ARMADA_PROBE_FORWARD_OFFSET, ARMADA_PROBE_LATERAL_OFFSET),
+            (0, -(ARMADA_PROBE_LATERAL_OFFSET + 1)),
+            (0, ARMADA_PROBE_LATERAL_OFFSET + 1),
+        )
+        forward, lateral = offsets[slot % len(offsets)]
+        desired = (
+            anchor[0] + dx * forward + px * lateral,
+            anchor[1] + dy * forward + py * lateral,
+        )
+        desired = self._legal_formation_target(desired, anchor)
+        moved = _queue_toward(
+            worker,
+            desired,
+            context,
+            target_radius=1,
+        )
+        if not moved:
+            worker.wait()
+        self._set_worker_mode(worker, "ARMADA_PROBE", desired)
+
+    def _update_armada_gather_status(
+        self,
+        turn: Turn,
+        armada_units: Sequence[object],
+    ) -> bool:
+        core = turn.core
+        if core is None:
+            self.armada_gathered = False
+            return False
+        if len(armada_units) < 4:
+            self.armada_gathered = False
+            return False
+
+        near_core_count = sum(
+            1 for u in armada_units if _distance(u.position, core.position) <= 8
+        )
+        threshold = max(4, int(len(armada_units) * 0.80))
+        local_ready = near_core_count >= threshold or (len(armada_units) - near_core_count <= 2)
+
+        coordinator = self.alliance_coordinator
+        if coordinator is not None and coordinator.expected_members > 1:
+            peers_ready = all(
+                getattr(peer, "armada_gathered", False)
+                or (
+                    peer.tick >= turn.tick
+                    and peer.core_position is not None
+                    and sum(
+                        1
+                        for unit in self._peer_armada_units(peer)
+                        if _distance(unit.position, peer.core_position) <= 10
+                    )
+                    >= max(
+                        3,
+                        int(len(self._peer_armada_units(peer)) * 0.70),
+                    )
+                )
+                for peer in self.alliance_peers
+                if peer.account_id != coordinator.account_id
+            ) if self.alliance_peers else False
+
+            if self.armada_gathered:
+                if len(armada_units) < 4:
+                    self.armada_gathered = False
+            else:
+                if local_ready and (peers_ready or not self.alliance_peers):
+                    self.armada_gathered = True
+        else:
+            if not self.armada_gathered and local_ready:
+                self.armada_gathered = True
+            elif self.armada_gathered and len(armada_units) < 4:
+                self.armada_gathered = False
+        return self.armada_gathered
+
     def _combat_patrol_target(
         self,
         turn: Turn,
         unit: object,
         index: int,
+        *,
+        strategic_target: Position | None = None,
     ) -> Position:
         core = turn.core
         if core is None:
             return unit.position
-        elapsed = max(0, turn.tick - (self.startup_tick or turn.tick))
-        radius = (
-            COMBAT_PATROL_INITIAL_RADIUS
-            + elapsed // COMBAT_PATROL_GROWTH_TICKS * COMBAT_PATROL_RING_STEP
+
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        armada_units = [
+            u
+            for u in (*turn.vanguards, *turn.rangers)
+            if u.id not in guard_vanguards
+            and u.id not in guard_rangers
+            and u.id not in self.alliance_defense_ids
+        ]
+
+        is_gathered = self._update_armada_gather_status(turn, armada_units)
+
+        if not is_gathered:
+            self.armada_anchor_position = core.position
+            self.armada_target_position = core.position
+            staging_dist = (
+                4
+                if getattr(unit, "unit_type", None) is UnitType.VANGUARD
+                else 3
+            )
+            vec = SCOUT_VECTORS[index % len(SCOUT_VECTORS)]
+            staging_pos = (
+                core.position[0] + vec[0] * staging_dist,
+                core.position[1] + vec[1] * staging_dist,
+            )
+            if _distance(unit.position, core.position) > staging_dist:
+                return core.position
+            return (
+                staging_pos
+                if _is_signed_int64_position(staging_pos)
+                else core.position
+            )
+
+        target = (
+            strategic_target
+            if strategic_target is not None
+            else self._armada_strategic_target(turn)
         )
-        vector = SCOUT_VECTORS[(unit.id.int + index) % len(SCOUT_VECTORS)]
-        return (
-            core.position[0] + vector[0] * radius,
-            core.position[1] + vector[1] * radius,
+        self.armada_target_position = target
+
+        alliance_units = self._alliance_armada_snapshots(turn, armada_units)
+        centroid = (
+            self._armada_centroid(alliance_units)
+            if alliance_units
+            else core.position
         )
+
+        self.armada_anchor_position = centroid
+        self.armada_mode = self._armada_formation_mode(
+            turn,
+            centroid,
+            target,
+        )
+
+        dx = 1 if target[0] > centroid[0] else (-1 if target[0] < centroid[0] else 0)
+        dy = 1 if target[1] > centroid[1] else (-1 if target[1] < centroid[1] else 0)
+        px, py = -dy, dx
+        typed_units = [
+            snapshot
+            for snapshot in alliance_units
+            if snapshot.unit_type is getattr(unit, "unit_type", None)
+        ]
+        global_index = next(
+            (
+                slot
+                for slot, snapshot in enumerate(typed_units)
+                if snapshot.unit_id == unit.id
+            ),
+            index,
+        )
+        unit_type = getattr(unit, "unit_type", None)
+
+        if self.armada_mode == "SIEGE":
+            vectors = (
+                ((0, -1), (1, 0), (0, 1), (-1, 0))
+                if unit_type is UnitType.VANGUARD
+                else RANGER_LINE_VECTORS
+            )
+            vx, vy = vectors[global_index % len(vectors)]
+            ring = (
+                1 + global_index // len(vectors)
+                if unit_type is UnitType.VANGUARD
+                else min(3, 2 + global_index // len(vectors))
+            )
+            formation_target = (target[0] + vx * ring, target[1] + vy * ring)
+        elif self.armada_mode == "COLUMN":
+            lateral = -1 if global_index % 2 == 0 else 0
+            forward = 1 if unit_type is UnitType.VANGUARD else -1
+            depth = (global_index // 2) % 3
+            formation_target = (
+                centroid[0] + dx * (forward - depth) + px * lateral,
+                centroid[1] + dy * (forward - depth) + py * lateral,
+            )
+        elif self.armada_mode == "CONTACT":
+            width = 7 if unit_type is UnitType.VANGUARD else 5
+            spread = (global_index % width) - width // 2
+            forward = 1 if unit_type is UnitType.VANGUARD else -1
+            formation_target = (
+                centroid[0] + dx * forward + px * spread,
+                centroid[1] + dy * forward + py * spread,
+            )
+        else:
+            width = 7 if unit_type is UnitType.VANGUARD else 5
+            spread = (global_index % width) - width // 2
+            if unit_type is UnitType.VANGUARD:
+                # A shallow arc keeps the middle screen slightly ahead.
+                forward = ARMADA_FORMATION_FRONT_OFFSET - abs(spread) // 3
+            else:
+                forward = -ARMADA_FORMATION_BACK_OFFSET
+            formation_target = (
+                centroid[0] + dx * forward + px * spread,
+                centroid[1] + dy * forward + py * spread,
+            )
+
+        formation_target = self._legal_formation_target(
+            formation_target,
+            centroid,
+        )
+
+        if _distance(unit.position, target) > _distance(centroid, target) + 8:
+            return target if _is_signed_int64_position(target) else unit.position
+
+        return formation_target if _is_signed_int64_position(formation_target) else target
 
     @staticmethod
     def _select_strike_group_ids(
@@ -6127,7 +7038,16 @@ class CoreFarmer:
                 vanguard.id not in guard_vanguards
                 and _queue_toward(
                     vanguard,
-                    self._combat_patrol_target(turn, vanguard, index),
+                    self._combat_patrol_target(
+                        turn,
+                        vanguard,
+                        index,
+                        strategic_target=(
+                            isolated_core_target.position
+                            if isolated_core_target is not None
+                            else None
+                        ),
+                    ),
                     context,
                 )
             ):
@@ -6495,7 +7415,16 @@ class CoreFarmer:
                 ranger.id not in guard_rangers
                 and _queue_toward(
                     ranger,
-                    self._combat_patrol_target(turn, ranger, index),
+                    self._combat_patrol_target(
+                        turn,
+                        ranger,
+                        index,
+                        strategic_target=(
+                            isolated_core_target.position
+                            if isolated_core_target is not None
+                            else None
+                        ),
+                    ),
                     context,
                 )
             ):
