@@ -39,6 +39,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- The armada no longer freezes in place while its sweep target rotates. The
+  median formation anchor was self-locking — the Units defining it were the ones
+  ordered to hold station around it — so a stretched fleet stopped advancing
+  entirely; live telemetry showed 12 cells of anchor movement across 400 Ticks.
+  A stalled advance now enters a bounded `BREAKOUT` that drops formation and
+  drives at the target, excluding arrived fleets and `CONTACT`/`SIEGE` postures.
 - The armada no longer crashes the Agent mid-Turn. Rallying a Unit that outran
   the fleet centroid read formation offsets that the `SIEGE` and `COLUMN`
   branches never assigned, raising `UnboundLocalError` out of `choose_actions()`

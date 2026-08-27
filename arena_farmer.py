@@ -246,6 +246,9 @@ ARMADA_GATHER_TIMEOUT_TICKS = 12
 ARMADA_GATHER_MIN_READY_UNITS = 4
 ARMADA_SWEEP_COMMIT_TICKS = 64
 ARMADA_SWEEP_ABANDON_TTL = 512
+ARMADA_ADVANCE_STALL_TICKS = 12
+ARMADA_BREAKOUT_TICKS = 16
+ARMADA_ADVANCE_ARRIVED_RADIUS = 8
 
 Position = tuple[int, int]
 
@@ -2526,6 +2529,10 @@ class CoreFarmer:
         self.armada_sweep_chunk: Position | None = None
         self.armada_sweep_committed_tick: int | None = None
         self.armada_sweep_abandoned: dict[Position, int] = {}
+        self.armada_advance_target: Position | None = None
+        self.armada_advance_best_distance: int | None = None
+        self.armada_advance_progress_tick: int | None = None
+        self.armada_breakout_until_tick: int = 0
         self.armada_gathered: bool = False
         self.armada_gather_started_tick: int | None = None
         self.armada_mode = "GATHER"
@@ -3177,6 +3184,9 @@ class CoreFarmer:
             ),
             "sweep_committed_tick": self.armada_sweep_committed_tick,
             "sweep_abandoned_chunks": len(self.armada_sweep_abandoned),
+            "advance_best_distance": self.armada_advance_best_distance,
+            "advance_progress_tick": self.armada_advance_progress_tick,
+            "breakout_until_tick": self.armada_breakout_until_tick,
             "manual_orders": list(self.manual_order_ids),
             "expedition_members": {
                 str(expedition_id): [
@@ -4288,6 +4298,8 @@ class CoreFarmer:
         self.armada_sweep_chunk = None
         self.armada_sweep_committed_tick = None
         self.armada_sweep_abandoned.clear()
+        self._reset_armada_advance_progress()
+        self.armada_breakout_until_tick = 0
         self.enemy_unit_sightings.clear()
         self.enemy_unit_motion.clear()
         self.active_enemy_ids.clear()
@@ -4887,6 +4899,7 @@ class CoreFarmer:
             and u.id not in self.alliance_defense_ids
         ]
         self._update_armada_gather_status(turn, armada_units)
+        self._update_armada_advance_progress(turn)
         self._refresh_threat_assessment(turn)
         if self.compatibility_hold:
             self._release_core_raid()
@@ -5605,6 +5618,57 @@ class CoreFarmer:
         last_seen = self.scout_chunk_last_seen.get(chunk)
         return last_seen is not None and turn.tick - last_seen <= 0
 
+    def _reset_armada_advance_progress(self) -> None:
+        self.armada_advance_target = None
+        self.armada_advance_best_distance = None
+        self.armada_advance_progress_tick = None
+
+    def _update_armada_advance_progress(self, turn: Turn) -> None:
+        """Break formation when the anchor stops closing on the sweep target.
+
+        The anchor is the median of the armada, so the Units that define it are
+        also the ones ordered to hold station around it.  A stretched fleet can
+        therefore freeze solid: the middle clump holds formation, the median
+        never moves, and the `proj_ahead` rally drags the leaders back into it.
+        Once that is detected the armada drives straight at the target until the
+        anchor closes again.
+
+        This runs once per Tick against the previous Tick's anchor and target,
+        which are the ones the fleet actually acted on.
+        """
+        anchor = self.armada_anchor_position
+        target = self.armada_target_position
+        if anchor is None or target is None or not self.armada_gathered:
+            self._reset_armada_advance_progress()
+            self.armada_breakout_until_tick = 0
+            return
+
+        distance = _distance(anchor, target)
+        if distance <= ARMADA_ADVANCE_ARRIVED_RADIUS:
+            # Arrived: the distance is meant to stop shrinking here.
+            self._reset_armada_advance_progress()
+            return
+        if target != self.armada_advance_target:
+            self.armada_advance_target = target
+            self.armada_advance_best_distance = distance
+            self.armada_advance_progress_tick = turn.tick
+            return
+
+        best = self.armada_advance_best_distance
+        if best is None or distance < best:
+            self.armada_advance_best_distance = distance
+            self.armada_advance_progress_tick = turn.tick
+            return
+
+        stalled_since = self.armada_advance_progress_tick
+        if stalled_since is None:
+            self.armada_advance_progress_tick = turn.tick
+            return
+        if turn.tick - stalled_since >= ARMADA_ADVANCE_STALL_TICKS:
+            self.armada_breakout_until_tick = turn.tick + ARMADA_BREAKOUT_TICKS
+            self.armada_advance_best_distance = distance
+            self.armada_advance_progress_tick = turn.tick
+
     def _armada_sweep_target(self, turn: Turn) -> Position:
         core = turn.core
         core_pos = self.armada_anchor_position or (
@@ -6128,6 +6192,17 @@ class CoreFarmer:
             centroid,
             target,
         )
+
+        # A stalled fleet abandons formation and drives at the target.  Contact
+        # and siege postures keep their formation: breaking those apart would
+        # feed Units into the enemy piecemeal, and an arrived fleet is supposed
+        # to stop closing anyway.
+        if (
+            turn.tick < self.armada_breakout_until_tick
+            and self.armada_mode not in {"CONTACT", "SIEGE"}
+        ):
+            self.armada_mode = "BREAKOUT"
+            return target if _is_signed_int64_position(target) else unit.position
 
         dx = 1 if target[0] > centroid[0] else (-1 if target[0] < centroid[0] else 0)
         dy = 1 if target[1] > centroid[1] else (-1 if target[1] < centroid[1] else 0)
@@ -8903,6 +8978,8 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"armada_sweep_chunk={f'{tactic.armada_sweep_chunk[0]}:{tactic.armada_sweep_chunk[1]}' if tactic.armada_sweep_chunk is not None else 'none'} "
         f"armada_sweep_committed={tactic.armada_sweep_committed_tick if tactic.armada_sweep_committed_tick is not None else 'none'} "
         f"armada_sweep_abandoned={len(tactic.armada_sweep_abandoned)} "
+        f"armada_advance_best={tactic.armada_advance_best_distance if tactic.armada_advance_best_distance is not None else 'none'} "
+        f"armada_breakout_until={tactic.armada_breakout_until_tick} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "
         f"threat_level={tactic.threat_assessment.level.value} "

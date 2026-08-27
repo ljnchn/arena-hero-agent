@@ -29,6 +29,7 @@ from arena_farmer import (
     AllianceEnemyUnitSighting,
     AllianceRosterClient,
     ARMADA_SWEEP_COMMIT_TICKS,
+    ARMADA_ADVANCE_STALL_TICKS,
     CoreRaidTarget,
     CoreFarmer,
     EnemyCoreSighting,
@@ -1043,6 +1044,111 @@ class AllianceCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(tactic.armada_mode, "SIEGE")
         self.assertNotIn(target, tactic.known_obstacles)
+
+    def test_stalled_armada_opens_a_breakout_window(self) -> None:
+        """Reproduces the live deadlock: a stretched fleet froze for good."""
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.armada_gathered = True
+        tactic.armada_target_position = (272, 0)
+        # The median sat in the middle clump, so the Units defining the anchor
+        # were also the ones ordered to hold it, and it never advanced.
+        tactic.armada_anchor_position = (113, 0)
+
+        for tick in range(100, 100 + ARMADA_ADVANCE_STALL_TICKS + 1):
+            tactic._update_armada_advance_progress(
+                make_turn(tick=tick, core_position=(0, 0))
+            )
+
+        self.assertGreater(tactic.armada_breakout_until_tick, 0)
+
+    def test_breakout_sends_units_straight_at_the_target(self) -> None:
+        vanguards = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (0, i))
+            for i in range(1, 7)
+        ]
+        rangers = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (1, i))
+            for i in range(1, 7)
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=200, core_position=(0, 0), units=vanguards + rangers)
+        tactic.armada_breakout_until_tick = 216
+        target = (272, 0)
+
+        patrol = tactic._combat_patrol_target(
+            turn,
+            turn.vanguards[5],
+            5,
+            strategic_target=target,
+        )
+
+        self.assertEqual(tactic.armada_mode, "BREAKOUT")
+        self.assertEqual(patrol, target)
+
+    def test_breakout_never_overrides_a_contact_or_siege_posture(self) -> None:
+        vanguards = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (0, i))
+            for i in range(1, 7)
+        ]
+        rangers = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (1, i))
+            for i in range(1, 7)
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=200,
+            core_position=(0, 0),
+            units=vanguards + rangers,
+            enemies=[
+                unit(
+                    "10000000-0000-4000-8000-000000000042",
+                    "VANGUARD",
+                    (3, 3),
+                    controlled=False,
+                )
+            ],
+        )
+        tactic.armada_breakout_until_tick = 216
+
+        tactic._combat_patrol_target(
+            turn,
+            turn.vanguards[5],
+            5,
+            strategic_target=(3, 3),
+        )
+
+        # Feeding Units into an engaged enemy piecemeal is worse than stalling.
+        self.assertEqual(tactic.armada_mode, "CONTACT")
+
+    def test_arrived_armada_is_not_mistaken_for_a_stall(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.armada_gathered = True
+        tactic.armada_anchor_position = (100, 0)
+        tactic.armada_target_position = (104, 0)
+
+        # Sitting on the target must never look like a stalled advance.
+        for tick in range(100, 100 + ARMADA_ADVANCE_STALL_TICKS * 3):
+            tactic._update_armada_advance_progress(
+                make_turn(tick=tick, core_position=(0, 0))
+            )
+
+        self.assertEqual(tactic.armada_breakout_until_tick, 0)
+        self.assertIsNone(tactic.armada_advance_best_distance)
+
+    def test_advancing_armada_never_triggers_a_breakout(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.armada_gathered = True
+        tactic.armada_target_position = (200, 0)
+
+        for offset, tick in enumerate(
+            range(100, 100 + ARMADA_ADVANCE_STALL_TICKS * 3)
+        ):
+            tactic.armada_anchor_position = (offset, 0)
+            tactic._update_armada_advance_progress(
+                make_turn(tick=tick, core_position=(0, 0))
+            )
+
+        self.assertEqual(tactic.armada_breakout_until_tick, 0)
 
     def test_armada_uses_column_when_obstacles_fill_forward_footprint(self) -> None:
         tactic = CoreFarmer()

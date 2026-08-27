@@ -80,6 +80,25 @@ gathered fleet marching across the map is the headline plan rather than the
 build order. `ASSAULT`, `RECOVERY`, `COMPATIBILITY_HOLD`, and `RESPAWNING` still
 take precedence over it.
 
+### Advance Stall Breakout
+
+Committing a chunk guarantees the *target* advances, not the fleet. The
+formation anchor is the median of the armada, so the Units that define it are
+also the ones ordered to hold station around it. A stretched fleet can freeze
+solid: the middle clump holds formation, the median never moves, and the
+`proj_ahead` rally drags the leaders back into it. Live telemetry showed an
+anchor moving 12 cells in 400 Ticks while the sweep chunk rotated seven times
+underneath it.
+
+`_update_armada_advance_progress()` runs once per Tick against the anchor and
+target the fleet actually acted on. When the anchor fails to close on the target
+for `ARMADA_ADVANCE_STALL_TICKS`, the armada enters `BREAKOUT` for
+`ARMADA_BREAKOUT_TICKS`: formation is abandoned and every non-guard combat Unit
+drives straight at the target until the anchor closes again. Two cases are
+excluded — a fleet within `ARMADA_ADVANCE_ARRIVED_RADIUS` of its target is
+supposed to stop closing, and `CONTACT`/`SIEGE` postures keep their formation
+because breaking those apart feeds Units into the enemy piecemeal.
+
 ## Beacon Campaign
 
 The Beacon campaign starts only when all of these are true:
