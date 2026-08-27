@@ -5644,6 +5644,7 @@ class CoreFarmer:
             and len(turn.units) >= 20
             and turn.core is not None
             and turn.beacon.carrier_id != turn.core.id
+            and _distance(turn.core.position, turn.beacon.position) <= 256
         ):
             return turn.beacon.position
         return self._armada_sweep_target(turn)
@@ -5690,9 +5691,14 @@ class CoreFarmer:
 
     @staticmethod
     def _armada_centroid(units: Sequence[AllianceUnitSnapshot]) -> Position:
+        if not units:
+            return (0, 0)
+        sorted_xs = sorted(unit.position[0] for unit in units)
+        sorted_ys = sorted(unit.position[1] for unit in units)
+        n = len(units)
         return (
-            round(sum(unit.position[0] for unit in units) / len(units)),
-            round(sum(unit.position[1] for unit in units) / len(units)),
+            (sorted_xs[n // 2] + sorted_xs[(n - 1) // 2]) // 2,
+            (sorted_ys[n // 2] + sorted_ys[(n - 1) // 2]) // 2,
         )
 
     def _armada_formation_mode(
@@ -5733,8 +5739,15 @@ class CoreFarmer:
         self,
         desired: Position,
         fallback: Position,
+        *,
+        current_position: Position | None = None,
     ) -> Position:
-        if desired not in self.known_obstacles and desired not in self.allied_occupied_cells:
+        allied_cells = (
+            self.allied_occupied_cells - {current_position}
+            if current_position is not None
+            else self.allied_occupied_cells
+        )
+        if desired not in self.known_obstacles and desired not in allied_cells:
             return desired
         candidates = [
             (desired[0] + dx, desired[1] + dy)
@@ -5748,7 +5761,7 @@ class CoreFarmer:
                 cell
                 for cell in candidates
                 if cell not in self.known_obstacles
-                and cell not in self.allied_occupied_cells
+                and cell not in allied_cells
                 and _is_signed_int64_position(cell)
             ),
             key=lambda cell: (_distance(cell, desired), _distance(cell, fallback), cell),
@@ -6096,6 +6109,7 @@ class CoreFarmer:
         formation_target = self._legal_formation_target(
             formation_target,
             centroid,
+            current_position=unit.position,
         )
 
         dist_to_centroid = _distance(unit.position, centroid)
@@ -6108,7 +6122,11 @@ class CoreFarmer:
                 centroid[0] + dx * forward + px * spread,
                 centroid[1] + dy * forward + py * spread,
             )
-            return self._legal_formation_target(hold_target, centroid)
+            return self._legal_formation_target(
+                hold_target,
+                centroid,
+                current_position=unit.position,
+            )
 
         return formation_target if _is_signed_int64_position(formation_target) else target
 
