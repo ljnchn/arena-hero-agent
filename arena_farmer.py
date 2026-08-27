@@ -3056,8 +3056,12 @@ class CoreFarmer:
         return True
 
     def _hostile_enemies(self, turn: Turn) -> tuple[object, ...]:
-        if not self.alliance_roster_ready:
-            return ()
+        # The shared roster only ever *adds* allies, and a client that has
+        # succeeded once keeps serving its cached snapshot, so an unready roster
+        # means it never worked and never protected anybody.  Gating hostility on
+        # it pacified the Agent outright: with the endpoint answering 403 the
+        # fleet sat one cell from enemy Cores for thousands of Ticks and issued
+        # zero attacks.  Local alliance state still shields the peer accounts.
         return tuple(
             enemy
             for enemy in turn.visible_enemies

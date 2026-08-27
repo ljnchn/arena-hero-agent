@@ -39,6 +39,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- An unreachable alliance roster no longer pacifies the Agent. `_hostile_enemies()`
+  returned an empty tuple whenever the shared roster had never loaded, so with the
+  endpoint answering `403` the fleet treated the entire map as friendly: no assault
+  target was ever selected, the strike group stayed empty, and the `sweep()`/`shoot()`
+  call sites became unreachable. Live history showed `SWEEP=0` and `SHOOT=0` across
+  4096 recorded Turns while three enemy Cores sat one cell from our Units. The roster
+  only ever adds allies and a client that has succeeded once keeps serving its cached
+  snapshot, so an unready roster never protected anyone; local alliance state still
+  shields peer accounts by object id, occupied cell, and username.
 - The armada no longer freezes in place while its sweep target rotates. The
   median formation anchor was self-locking — the Units defining it were the ones
   ordered to hold station around it — so a stretched fleet stopped advancing

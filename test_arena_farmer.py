@@ -367,7 +367,9 @@ class AllianceCoordinatorTests(unittest.TestCase):
         self.assertEqual(client.last_error, "OSError")
         self.assertEqual(attempts, 2)
 
-    def test_external_roster_initial_failure_suppresses_attacks(self) -> None:
+    def test_external_roster_initial_failure_still_allows_attacks(self) -> None:
+        """A roster that never worked never protected anyone; it must not pacify."""
+
         def opener(_request: object, *, timeout: float) -> object:
             raise OSError("offline")
 
@@ -389,11 +391,73 @@ class AllianceCoordinatorTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             tactic.choose_actions(turn)
 
-        queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertFalse(tactic.alliance_roster_ready)
-        self.assertEqual(tactic._hostile_enemies(turn), ())
-        self.assertNotIn("SHOOT", str(queued))
-        self.assertNotIn("SWEEP", str(queued))
+        self.assertEqual(len(tactic._hostile_enemies(turn)), 1)
+
+    def test_unreachable_roster_never_exposes_the_allied_peer(self) -> None:
+        """The live constraint: the two owned accounts must never fight."""
+
+        def opener(_request: object, *, timeout: float) -> object:
+            raise OSError("offline")
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        ally_core_id = UUID(ALLY_CORE_ID)
+        ally_unit_id = UUID(ALLY_UNIT_ID)
+        tactic.allied_object_ids = {ally_core_id, ally_unit_id}
+        tactic.allied_usernames = {"batman"}
+        turn = make_turn(
+            tick=100,
+            units=[unit(RANGER_1, "RANGER", (0, 1))],
+            enemies=[
+                enemy_core(ALLY_CORE_ID, (4, 1)),
+                unit(ALLY_UNIT_ID, "VANGUARD", (3, 1), controlled=False),
+                unit(ENEMY_1, "RANGER", (2, 1), controlled=False),
+            ],
+        )
+
+        with redirect_stderr(io.StringIO()):
+            hostiles = tactic._hostile_enemies(turn)
+
+        hostile_ids = {enemy.id for enemy in hostiles}
+        self.assertNotIn(ally_core_id, hostile_ids)
+        self.assertNotIn(ally_unit_id, hostile_ids)
+        self.assertEqual(hostile_ids, {UUID(ENEMY_1)})
+
+    def test_allied_core_by_username_survives_an_unreachable_roster(self) -> None:
+        def opener(_request: object, *, timeout: float) -> object:
+            raise OSError("offline")
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        # Only the username is known, as happens before the peer's ids arrive.
+        tactic.allied_usernames = {"batman"}
+        ally = enemy_core(ALLY_CORE_ID, (4, 1))
+        ally["owner_username"] = "batman"
+        turn = make_turn(
+            tick=100,
+            units=[unit(RANGER_1, "RANGER", (0, 1))],
+            enemies=[ally, enemy_core(ENEMY_2, (6, 1))],
+        )
+
+        with redirect_stderr(io.StringIO()):
+            hostiles = tactic._hostile_enemies(turn)
+
+        self.assertEqual({enemy.id for enemy in hostiles}, {UUID(ENEMY_2)})
 
     def test_follower_core_moves_toward_population_leader_only_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

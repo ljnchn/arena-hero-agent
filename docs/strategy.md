@@ -114,6 +114,14 @@ the Core. The Core itself never moves just to pursue or retreat from a Beacon.
 
 ## Safety And Recovery
 
+The shared alliance roster is an *additive* ally source: it can only add names
+and object ids on top of the local alliance state. A roster client that has
+succeeded once keeps serving its cached snapshot, so a roster that is "not
+ready" is one that never loaded at all and therefore never protected anybody.
+Hostility must not be gated on it — doing so pacified the Agent completely while
+the endpoint answered `403`. Peer accounts stay protected by object id, occupied
+cell, and username from the local coordinator.
+
 Lifecycle, threat, and mission layers remain independent. `RESPAWNING` queues
 no invented actions, `COMPATIBILITY_HOLD` stops offensive production, and
 `RECOVERY` rebuilds locally after a replacement Core. A hard survival threat
