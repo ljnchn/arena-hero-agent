@@ -9,15 +9,17 @@ corrections may go directly to a focused pull request.
 
 ## Setup
 
-Before changing any tracked file, synchronize the clean `main` checkout with
+Before changing any tracked file, synchronize the clean trunk checkout with
 GitHub using the cross-platform preflight:
 
 ```bash
 python scripts/sync-main.py
 ```
 
-The command fetches only `origin/main`, fast-forwards when the checkout is
-behind, and refuses dirty, ahead, divergent, detached, or non-`main` states.
+The trunk is `codex/mass-army` on the `ljnchn` remote; `main` is a stale fork
+point and is not used for development. The command fetches only that trunk,
+fast-forwards when the checkout is behind, and refuses dirty, ahead, divergent,
+detached, or off-trunk states.
 
 ```bash
 python -m venv .venv

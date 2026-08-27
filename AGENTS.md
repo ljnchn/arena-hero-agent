@@ -6,10 +6,12 @@ Before editing source, tests, deployment scripts, or project documentation, run:
 python scripts/sync-main.py
 ```
 
-Proceed only when it reports `up-to-date` or `fast-forwarded`. The command must
-refuse a dirty tree, a branch other than `main`, a local-ahead branch, or a
-divergence from `origin/main`; resolve those states explicitly instead of
-merging automatically.
+Proceed only when it reports `up-to-date` or `fast-forwarded`. The trunk of this
+repository is `codex/mass-army` on the `ljnchn` remote; `main` is a stale fork
+point and is not used for development. The command must refuse a dirty tree, a
+branch other than the trunk, a local-ahead branch, or a divergence from
+`ljnchn/codex/mass-army`; resolve those states explicitly instead of merging
+automatically.
 
 The live Arena Hero instance runs on the separately managed server. A local
 process or checkout is not evidence of the deployed version. Production updates

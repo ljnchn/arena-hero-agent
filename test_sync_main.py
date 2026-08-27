@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import tempfile
 import unittest
@@ -29,20 +30,20 @@ class SyncMainTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         root = Path(self.temporary_directory.name)
-        self.origin = root / "origin.git"
+        self.remote = root / "trunk.git"
         self.seed = root / "seed"
         self.checkout = root / "checkout"
-        git(root, "init", "--bare", str(self.origin))
-        git(root, "clone", str(self.origin), str(self.seed))
+        git(root, "init", "--bare", str(self.remote))
+        git(root, "clone", "--origin", sync_main.TRUNK_REMOTE, str(self.remote), str(self.seed))
         git(self.seed, "config", "user.email", "tests@example.invalid")
         git(self.seed, "config", "user.name", "Arena Hero Tests")
-        git(self.seed, "switch", "-c", "main")
+        git(self.seed, "switch", "-c", sync_main.TRUNK_BRANCH)
         (self.seed / "tracked.txt").write_text("one\n", encoding="utf-8")
         git(self.seed, "add", "tracked.txt")
         git(self.seed, "commit", "-m", "initial")
-        git(self.seed, "push", "-u", "origin", "main")
-        git(self.origin, "symbolic-ref", "HEAD", "refs/heads/main")
-        git(root, "clone", str(self.origin), str(self.checkout))
+        git(self.seed, "push", "-u", sync_main.TRUNK_REMOTE, sync_main.TRUNK_BRANCH)
+        git(self.remote, "symbolic-ref", "HEAD", f"refs/heads/{sync_main.TRUNK_BRANCH}")
+        git(root, "clone", "--origin", sync_main.TRUNK_REMOTE, str(self.remote), str(self.checkout))
         git(self.checkout, "config", "user.email", "tests@example.invalid")
         git(self.checkout, "config", "user.name", "Arena Hero Tests")
 
@@ -53,14 +54,14 @@ class SyncMainTests(unittest.TestCase):
         (self.seed / "tracked.txt").write_text(text, encoding="utf-8")
         git(self.seed, "add", "tracked.txt")
         git(self.seed, "commit", "-m", text.strip())
-        git(self.seed, "push", "origin", "main")
+        git(self.seed, "push", sync_main.TRUNK_REMOTE, sync_main.TRUNK_BRANCH)
         return git(self.seed, "rev-parse", "HEAD")
 
-    def test_current_main_is_accepted(self) -> None:
+    def test_current_trunk_is_accepted(self) -> None:
         commit = sync_main.synchronize(self.checkout)
-        self.assertEqual(commit, git(self.checkout, "rev-parse", "origin/main"))
+        self.assertEqual(commit, git(self.checkout, "rev-parse", f"{sync_main.TRUNK_REMOTE}/{sync_main.TRUNK_BRANCH}"))
 
-    def test_behind_main_is_fast_forwarded(self) -> None:
+    def test_behind_trunk_is_fast_forwarded(self) -> None:
         remote = self.push_remote_change()
         commit = sync_main.synchronize(self.checkout)
         self.assertEqual(commit, remote)
@@ -71,9 +72,9 @@ class SyncMainTests(unittest.TestCase):
         with self.assertRaisesRegex(sync_main.SyncError, "not clean"):
             sync_main.synchronize(self.checkout)
 
-    def test_non_main_branch_is_refused(self) -> None:
+    def test_non_trunk_branch_is_refused(self) -> None:
         git(self.checkout, "switch", "-c", "topic")
-        with self.assertRaisesRegex(sync_main.SyncError, "expected branch main"):
+        with self.assertRaisesRegex(sync_main.SyncError, f"expected branch {re.escape(sync_main.TRUNK_BRANCH)}"):
             sync_main.synchronize(self.checkout)
 
     def test_local_ahead_is_refused(self) -> None:
@@ -83,7 +84,7 @@ class SyncMainTests(unittest.TestCase):
         with self.assertRaisesRegex(sync_main.SyncError, "ahead"):
             sync_main.synchronize(self.checkout)
 
-    def test_diverged_main_is_refused(self) -> None:
+    def test_diverged_trunk_is_refused(self) -> None:
         (self.checkout / "local.txt").write_text("local\n", encoding="utf-8")
         git(self.checkout, "add", "local.txt")
         git(self.checkout, "commit", "-m", "local")
