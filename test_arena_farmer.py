@@ -904,6 +904,164 @@ class AllianceCoordinatorTests(unittest.TestCase):
         self.assertEqual(target, (0, 0))
         self.assertFalse(tactic.armada_gathered)
 
+    def test_armada_launches_after_timeout_without_waiting_for_stale_stragglers(self) -> None:
+        units = [
+            unit("00000000-0000-4000-8000-0000000000c8", "VANGUARD", (1, 0)),
+            unit("00000000-0000-4000-8000-0000000000c9", "VANGUARD", (0, 1)),
+            unit("00000000-0000-4000-8000-0000000000ca", "VANGUARD", (2, 0)),
+            unit("00000000-0000-4000-8000-0000000000cb", "VANGUARD", (0, 2)),
+            unit("00000000-0000-4000-8000-0000000000cc", "VANGUARD", (3, 0)),
+            unit("00000000-0000-4000-8000-0000000000cd", "VANGUARD", (0, 3)),
+            unit("00000000-0000-4000-8000-0000000000ce", "VANGUARD", (50, 0)),
+            unit("00000000-0000-4000-8000-0000000000cf", "VANGUARD", (0, 50)),
+            unit("00000000-0000-4000-8000-0000000000d0", "RANGER", (1, 1)),
+            unit("00000000-0000-4000-8000-0000000000d1", "RANGER", (-1, 0)),
+            unit("00000000-0000-4000-8000-0000000000d2", "RANGER", (2, 1)),
+            unit("00000000-0000-4000-8000-0000000000d3", "RANGER", (-2, 0)),
+            unit("00000000-0000-4000-8000-0000000000d4", "RANGER", (3, 1)),
+            unit("00000000-0000-4000-8000-0000000000d5", "RANGER", (-3, 0)),
+            unit("00000000-0000-4000-8000-0000000000d6", "RANGER", (50, 1)),
+            unit("00000000-0000-4000-8000-0000000000d7", "RANGER", (1, 50)),
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+
+        for tick in range(100, 112):
+            tactic.choose_actions(make_turn(tick=tick, units=units))
+
+        self.assertFalse(tactic.armada_gathered)
+
+        final_turn = make_turn(tick=112, units=units)
+        tactic.choose_actions(final_turn)
+
+        self.assertTrue(tactic.armada_gathered)
+        self.assertNotEqual(tactic.armada_target_position, (0, 0))
+        actions = final_turn.plan.model_dump(mode="json", exclude_none=True)[
+            "unit_actions"
+        ]
+        self.assertIn("MOVE", {action["type"] for action in actions.values()})
+
+    def test_armada_marches_continuously_towards_target(self) -> None:
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (1, i))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, i))
+            for i in range(1, 7)
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=100, core_position=(0, 0), units=vanguard_dicts + ranger_dicts)
+
+        strategic_target = (100, 0)
+        # Advance armada target
+        v_target = tactic._combat_patrol_target(
+            turn,
+            turn.vanguards[5],
+            5,
+            strategic_target=strategic_target,
+        )
+        r_target = tactic._combat_patrol_target(
+            turn,
+            turn.rangers[5],
+            5,
+            strategic_target=strategic_target,
+        )
+        self.assertGreater(v_target[0], 0)
+        self.assertGreater(r_target[0], 0)
+        self.assertGreater(v_target[0], r_target[0])
+
+    def test_armada_multi_tick_march_advances_fleet_across_map(self) -> None:
+        # Simulate an armada advancing east over multiple ticks
+        units_map = {
+            f"00000000-0000-4000-8000-{i:012x}": ("VANGUARD", (1, i))
+            for i in range(1, 7)
+        }
+        units_map.update({
+            f"00000000-0000-4000-8000-{100 + i:012x}": ("RANGER", (0, i))
+            for i in range(1, 7)
+        })
+        tactic = CoreFarmer(worker_target=1, beacon_policy="pursue")
+
+        for tick in range(100, 110):
+            units_list = [
+                unit(uid, utype, pos)
+                for uid, (utype, pos) in units_map.items()
+            ]
+            turn = make_turn(tick=tick, core_position=(0, 0), beacon_position=(100, 0), units=units_list)
+            tactic.choose_actions(turn)
+            actions = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+            # Apply moves
+            dir_deltas = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+            for uid, act in actions.items():
+                if act.get("type") == "MOVE" and uid in units_map:
+                    delta = dir_deltas.get(act.get("direction"), (0, 0))
+                    utype, (ux, uy) = units_map[uid]
+                    units_map[uid] = (utype, (ux + delta[0], uy + delta[1]))
+
+        turn = make_turn(tick=110, core_position=(0, 0), beacon_position=(100, 0), units=[unit(uid, utype, pos) for uid, (utype, pos) in units_map.items()])
+        guards = _core_guard_ids(turn)
+        armada_v_xs = [pos[0] for uid, (utype, pos) in units_map.items() if utype == "VANGUARD" and UUID(uid) not in guards[0]]
+        armada_r_xs = [pos[0] for uid, (utype, pos) in units_map.items() if utype == "RANGER" and UUID(uid) not in guards[1]]
+        # Active armada expedition units should advance eastward significantly
+        self.assertGreater(max(armada_v_xs), 5)
+        self.assertGreater(max(armada_r_xs), 3)
+
+    def test_armada_vanguard_charges_nearby_enemy(self) -> None:
+        # 6 Vanguards near core so armada is gathered
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (i, 0))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, i))
+            for i in range(1, 7)
+        ]
+        enemy_dicts = [
+            unit("00000000-0000-4000-9000-000000000001", "RANGER", (6, 2), controlled=False),
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=100,
+            core_position=(0, 0),
+            units=vanguard_dicts + ranger_dicts,
+            enemies=enemy_dicts,
+        )
+        tactic.choose_actions(turn)
+        actions = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        # The vanguard at (6, 0) should move toward the enemy at (6, 2)
+        vanguard_id = "00000000-0000-4000-8000-000000000006"
+        self.assertIn(vanguard_id, actions)
+        self.assertEqual(actions[vanguard_id]["type"], "MOVE")
+        self.assertEqual(actions[vanguard_id]["direction"], "DOWN")
+
+    def test_armada_ranger_maneuvers_to_shooting_line(self) -> None:
+        # Ranger 6 at (6, 5) facing enemy at (7, 7) -> delta (1, 2), not directly aligned.
+        # Moving RIGHT to (7, 5) creates vertical line (0, 2) which is shootable!
+        vanguard_dicts = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (i, 0))
+            for i in range(1, 7)
+        ]
+        ranger_dicts = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (i, 5))
+            for i in range(1, 7)
+        ]
+        enemy_dicts = [
+            unit("00000000-0000-4000-9000-000000000001", "WORKER", (7, 7), controlled=False),
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=100,
+            core_position=(0, 0),
+            units=vanguard_dicts + ranger_dicts,
+            enemies=enemy_dicts,
+        )
+        tactic.choose_actions(turn)
+        actions = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        ranger_id = "00000000-0000-4000-8000-00000000006a"
+        self.assertIn(ranger_id, actions)
+        self.assertEqual(actions[ranger_id]["type"], "MOVE")
+        self.assertEqual(actions[ranger_id]["direction"], "RIGHT")
+
 
 class ResourceLedgerTests(unittest.TestCase):
     @staticmethod

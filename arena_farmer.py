@@ -242,6 +242,8 @@ ARMADA_PROBE_MIN_WORKERS = BASE_WORKER_TARGET + 1
 ARMADA_PROBE_FORWARD_OFFSET = 3
 ARMADA_PROBE_LATERAL_OFFSET = 4
 ARMADA_CONTACT_RADIUS = 8
+ARMADA_GATHER_TIMEOUT_TICKS = 12
+ARMADA_GATHER_MIN_READY_UNITS = 4
 
 Position = tuple[int, int]
 
@@ -2521,6 +2523,7 @@ class CoreFarmer:
         self.armada_anchor_position: Position | None = None
         self.armada_sweep_chunk: Position | None = None
         self.armada_gathered: bool = False
+        self.armada_gather_started_tick: int | None = None
         self.armada_mode = "GATHER"
         self.armada_probe_ids: set[UUID] = set()
         self.armada_probe_slots: dict[UUID, int] = {}
@@ -4803,6 +4806,15 @@ class CoreFarmer:
         self._update_enemy_awareness(turn)
         self._refresh_compatibility_hold()
         self.known_obstacles.update(turn.obstacle_cells)
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        armada_units = [
+            u
+            for u in (*turn.vanguards, *turn.rangers)
+            if u.id not in guard_vanguards
+            and u.id not in guard_rangers
+            and u.id not in self.alliance_defense_ids
+        ]
+        self._update_armada_gather_status(turn, armada_units)
         self._refresh_threat_assessment(turn)
         if self.compatibility_hold:
             self._release_core_raid()
@@ -5874,16 +5886,27 @@ class CoreFarmer:
         core = turn.core
         if core is None:
             self.armada_gathered = False
+            self.armada_gather_started_tick = None
             return False
-        if len(armada_units) < 4:
+        if len(armada_units) < ARMADA_GATHER_MIN_READY_UNITS:
             self.armada_gathered = False
+            self.armada_gather_started_tick = None
             return False
+        if self.armada_gather_started_tick is None:
+            self.armada_gather_started_tick = turn.tick
 
         near_core_count = sum(
             1 for u in armada_units if _distance(u.position, core.position) <= 8
         )
-        threshold = max(4, int(len(armada_units) * 0.80))
-        local_ready = near_core_count >= threshold or (len(armada_units) - near_core_count <= 2)
+        threshold = max(ARMADA_GATHER_MIN_READY_UNITS, int(len(armada_units) * 0.80))
+        local_ready = near_core_count >= threshold or (
+            len(armada_units) - near_core_count <= 2
+        )
+        gather_timed_out = (
+            not self.armada_gathered
+            and turn.tick - self.armada_gather_started_tick
+            >= ARMADA_GATHER_TIMEOUT_TICKS
+        )
 
         coordinator = self.alliance_coordinator
         if coordinator is not None and coordinator.expected_members > 1:
@@ -5907,16 +5930,16 @@ class CoreFarmer:
             ) if self.alliance_peers else False
 
             if self.armada_gathered:
-                if len(armada_units) < 4:
+                if len(armada_units) < ARMADA_GATHER_MIN_READY_UNITS:
                     self.armada_gathered = False
-            else:
-                if local_ready and (peers_ready or not self.alliance_peers):
-                    self.armada_gathered = True
-        else:
-            if not self.armada_gathered and local_ready:
+            elif (local_ready or gather_timed_out) and (
+                peers_ready or not self.alliance_peers or gather_timed_out
+            ):
                 self.armada_gathered = True
-            elif self.armada_gathered and len(armada_units) < 4:
-                self.armada_gathered = False
+        elif not self.armada_gathered and (local_ready or gather_timed_out):
+            self.armada_gathered = True
+        elif self.armada_gathered and len(armada_units) < ARMADA_GATHER_MIN_READY_UNITS:
+            self.armada_gathered = False
         return self.armada_gathered
 
     def _combat_patrol_target(
@@ -6019,38 +6042,73 @@ class CoreFarmer:
             lateral = -1 if global_index % 2 == 0 else 0
             forward = 1 if unit_type is UnitType.VANGUARD else -1
             depth = (global_index // 2) % 3
-            formation_target = (
-                centroid[0] + dx * (forward - depth) + px * lateral,
-                centroid[1] + dy * (forward - depth) + py * lateral,
-            )
+            if _distance(centroid, target) <= 6:
+                formation_target = (
+                    target[0] + dx * (forward - depth) + px * lateral,
+                    target[1] + dy * (forward - depth) + py * lateral,
+                )
+            else:
+                lead = forward - depth + 4
+                formation_target = (
+                    centroid[0] + dx * lead + px * lateral,
+                    centroid[1] + dy * lead + py * lateral,
+                )
         elif self.armada_mode == "CONTACT":
             width = 7 if unit_type is UnitType.VANGUARD else 5
             spread = (global_index % width) - width // 2
             forward = 1 if unit_type is UnitType.VANGUARD else -1
-            formation_target = (
-                centroid[0] + dx * forward + px * spread,
-                centroid[1] + dy * forward + py * spread,
-            )
+            if _distance(centroid, target) <= 6:
+                if unit_type is UnitType.VANGUARD:
+                    formation_target = (
+                        target[0] + px * spread,
+                        target[1] + py * spread,
+                    )
+                else:
+                    formation_target = (
+                        target[0] - dx * 2 + px * spread,
+                        target[1] - dy * 2 + py * spread,
+                    )
+            else:
+                lead = forward + 3
+                formation_target = (
+                    centroid[0] + dx * lead + px * spread,
+                    centroid[1] + dy * lead + py * spread,
+                )
         else:
             width = 7 if unit_type is UnitType.VANGUARD else 5
             spread = (global_index % width) - width // 2
             if unit_type is UnitType.VANGUARD:
-                # A shallow arc keeps the middle screen slightly ahead.
                 forward = ARMADA_FORMATION_FRONT_OFFSET - abs(spread) // 3
             else:
                 forward = -ARMADA_FORMATION_BACK_OFFSET
-            formation_target = (
-                centroid[0] + dx * forward + px * spread,
-                centroid[1] + dy * forward + py * spread,
-            )
+            if _distance(centroid, target) <= 6:
+                formation_target = (
+                    target[0] + dx * forward + px * spread,
+                    target[1] + dy * forward + py * spread,
+                )
+            else:
+                lead = forward + 4
+                formation_target = (
+                    centroid[0] + dx * lead + px * spread,
+                    centroid[1] + dy * lead + py * spread,
+                )
 
         formation_target = self._legal_formation_target(
             formation_target,
             centroid,
         )
 
-        if _distance(unit.position, target) > _distance(centroid, target) + 8:
+        dist_to_centroid = _distance(unit.position, centroid)
+        if dist_to_centroid > 8 or _distance(unit.position, target) > _distance(centroid, target) + 8:
             return target if _is_signed_int64_position(target) else unit.position
+
+        proj_ahead = (unit.position[0] - centroid[0]) * dx + (unit.position[1] - centroid[1]) * dy
+        if proj_ahead > 4:
+            hold_target = (
+                centroid[0] + dx * forward + px * spread,
+                centroid[1] + dy * forward + py * spread,
+            )
+            return self._legal_formation_target(hold_target, centroid)
 
         return formation_target if _is_signed_int64_position(formation_target) else target
 
@@ -6988,7 +7046,11 @@ class CoreFarmer:
                 if direction is not None:
                     vanguard.sweep(direction)
                     continue
-            if self.combat_pressure_active:
+            if self.combat_pressure_active and (
+                vanguard.id in guard_vanguards
+                or not self.armada_gathered
+                or _distance(vanguard.position, core.position) <= VANGUARD_GUARD_RADIUS + 1
+            ):
                 target_position = _guard_post(
                     vanguard,
                     core.position,
@@ -7012,7 +7074,14 @@ class CoreFarmer:
                     continue
                 vanguard.wait()
                 continue
-            if _queue_away_from_enemies(
+            if (
+                vanguard.hp <= 1
+                or _locally_outnumbered(
+                    vanguard,
+                    (*turn.vanguards, *turn.rangers),
+                    nearby_retreat_enemies,
+                )
+            ) and _queue_away_from_enemies(
                 vanguard,
                 nearby_retreat_enemies,
                 context,
@@ -7031,6 +7100,19 @@ class CoreFarmer:
                     continue
 
             if nearby_enemies:
+                if vanguard.id not in guard_vanguards:
+                    target_enemy = min(
+                        nearby_enemies,
+                        key=lambda enemy: _combat_target_key(vanguard.position, enemy),
+                    )
+                    if _queue_toward(
+                        vanguard,
+                        target_enemy.position,
+                        context,
+                        allow_enemy_target=True,
+                        avoid_danger=False,
+                    ):
+                        continue
                 vanguard.wait()
                 continue
 
@@ -7049,8 +7131,14 @@ class CoreFarmer:
                         ),
                     ),
                     context,
+                    allow_enemy_target=True,
+                    avoid_danger=False,
                 )
             ):
+                continue
+
+            if vanguard.id not in guard_vanguards and self.armada_gathered:
+                vanguard.wait()
                 continue
 
             target_position = _guard_post(
@@ -7367,7 +7455,11 @@ class CoreFarmer:
                 )
                 ranger.shoot(target)
                 continue
-            if self.combat_pressure_active:
+            if self.combat_pressure_active and (
+                ranger.id in guard_rangers
+                or not self.armada_gathered
+                or _distance(ranger.position, core.position) <= RANGER_GUARD_RADIUS + 1
+            ):
                 target_position = _guard_post(
                     ranger,
                     core.position,
@@ -7391,14 +7483,6 @@ class CoreFarmer:
                     continue
                 ranger.wait()
                 continue
-            if _queue_away_from_enemies(
-                ranger,
-                nearby_enemies,
-                context,
-                turn.beacon.position,
-                keep_core_neighbors_clear=True,
-            ):
-                continue
             if shootable:
                 target = min(
                     shootable,
@@ -7407,7 +7491,53 @@ class CoreFarmer:
                 ranger.shoot(target)
                 continue
 
+            adjacent_enemies = [
+                enemy
+                for enemy in nearby_enemies
+                if _distance(ranger.position, enemy.position) == 1
+                and getattr(enemy, "kind", None) != "CORE"
+            ]
+            if adjacent_enemies and _queue_away_from_enemies(
+                ranger,
+                adjacent_enemies,
+                context,
+                turn.beacon.position,
+                keep_core_neighbors_clear=True,
+            ):
+                continue
+
             if nearby_enemies:
+                maneuvered = False
+                for direction in CARDINAL_DIRECTIONS:
+                    candidate_pos = _destination(ranger.position, direction)
+                    if (
+                        candidate_pos not in context.obstacles
+                        and candidate_pos not in context.allied_cells
+                        and candidate_pos not in context.danger_cells
+                        and any(
+                            _ranger_can_shoot(candidate_pos, enemy.position, context.obstacles)
+                            and _distance(candidate_pos, enemy.position) >= 2
+                            for enemy in nearby_enemies
+                        )
+                    ):
+                        if _queue_move(ranger, (direction,), context):
+                            maneuvered = True
+                            break
+                if maneuvered:
+                    continue
+                if ranger.id not in guard_rangers and self.armada_gathered:
+                    target_enemy = min(
+                        nearby_enemies,
+                        key=lambda enemy: _combat_target_key(ranger.position, enemy),
+                    )
+                    if _queue_toward(
+                        ranger,
+                        target_enemy.position,
+                        context,
+                        target_radius=2,
+                        avoid_danger=False,
+                    ):
+                        continue
                 ranger.wait()
                 continue
 
@@ -7428,6 +7558,10 @@ class CoreFarmer:
                     context,
                 )
             ):
+                continue
+
+            if ranger.id not in guard_rangers and self.armada_gathered:
+                ranger.wait()
                 continue
 
             target_position = _guard_post(
@@ -8563,6 +8697,23 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         default=0,
     )
     population = len(turn.units)
+    guard_vanguards, guard_rangers = _core_guard_ids(turn)
+    armada_units = [
+        unit
+        for unit in (*turn.vanguards, *turn.rangers)
+        if unit.id not in guard_vanguards
+        and unit.id not in guard_rangers
+        and unit.id not in tactic.alliance_defense_ids
+    ]
+    armada_near_core = sum(
+        _distance(unit.position, core.position) <= 8 for unit in armada_units
+    )
+    armada_threshold = max(4, int(len(armada_units) * 0.80)) if armada_units else 0
+    armada_target_distance = (
+        _distance(core.position, tactic.armada_target_position)
+        if tactic.armada_target_position is not None
+        else 0
+    )
     enemy_counts = _visible_enemy_counts(turn)
     core_action = plan.get("core_action", {})
     core_action_name = core_action.get("type", "NONE")
@@ -8607,6 +8758,13 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"allied_objects={len(tactic.allied_object_ids)} "
         f"alliance_roster_ready={int(tactic.alliance_roster_ready)} "
         f"alliance_roster_tick={tactic.alliance_roster_tick if tactic.alliance_roster_tick is not None else 'none'} "
+        f"armada_units={len(armada_units)} "
+        f"armada_near_core={armada_near_core} "
+        f"armada_threshold={armada_threshold} "
+        f"armada_gathered={int(tactic.armada_gathered)} "
+        f"armada_mode={tactic.armada_mode} "
+        f"armada_target_distance={armada_target_distance} "
+        f"armada_gather_started={tactic.armada_gather_started_tick if tactic.armada_gather_started_tick is not None else 'none'} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "
         f"threat_level={tactic.threat_assessment.level.value} "
