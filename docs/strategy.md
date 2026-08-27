@@ -35,7 +35,7 @@ immediate threat can spend it on emergency combat units.
 1. Survive a direct Core threat.
 2. Attack a visible hostile Core.
 3. Attack visible hostile combat units and Workers.
-4. Patrol unexplored or stale perimeter sectors.
+4. Sweep unexplored or stale map chunks with the gathered armada.
 5. Contest the Champion Beacon when the force is mature.
 
 Visible enemy Cores are not required to be isolated, stationary, repeatedly
@@ -46,6 +46,39 @@ legal cell fire; Vanguards sweep adjacent targets or move toward the target.
 One Vanguard and one Ranger remain as Core guards. Other combat units join the
 strike group. When there is no visible target, non-guard units follow
 deterministic outward patrol sectors whose radius grows with elapsed Ticks.
+
+## Armada Sweep
+
+The sweep is the default behaviour of a gathered armada, not a separate mode an
+operator has to start. Once at least four non-guard combat units have rallied at
+the Core — or the twelve-Tick gather timeout expires — the fleet marches on a
+sweep leg without any further prompting.
+
+A leg is one 32x32 map chunk. The scorer ranks candidate chunks by:
+
+1. a remembered enemy Core inside the chunk;
+2. whether the chunk was recently abandoned as unreachable;
+3. how long ago the chunk was last observed;
+4. distance from the armada anchor.
+
+Candidates are the anchor's own chunk neighbourhood plus the frontier around
+every chunk in coverage memory, so a fleet that spawns far from the world origin
+still has somewhere legal to march.
+
+The chosen chunk is then **committed**. The armada holds that leg until it
+actually stands in the chunk, rather than re-scoring every Tick: the march keeps
+revealing nearer frontier neighbours, and re-scoring made the fleet swing
+sideways instead of arriving. Two escapes keep the commitment from becoming a
+deadlock — a newly sighted enemy Core preempts the leg immediately, and a chunk
+that stays unreached for `ARMADA_SWEEP_COMMIT_TICKS` is parked in the abandoned
+set so the scorer moves on. Abandoned chunks expire after
+`ARMADA_SWEEP_ABANDON_TTL` and become eligible again.
+
+`strategy_phase()` reports `ARMADA_SWEEP` while this runs. It outranks the
+`MOBILIZE_*` labels because production continues throughout a sweep, and a
+gathered fleet marching across the map is the headline plan rather than the
+build order. `ASSAULT`, `RECOVERY`, `COMPATIBILITY_HOLD`, and `RESPAWNING` still
+take precedence over it.
 
 ## Beacon Campaign
 
@@ -71,3 +104,11 @@ evasion logic.
 Every accepted Turn can be written to SQLite. The dashboard uses this history
 to replay explored cells, resources, unit trails, events, and historical enemy
 Core sightings without exposing credentials.
+
+`CoreFarmer.strategy_summary()` is the single aggregate every reporting surface
+reads: the systemd `STATUS=` line, the SQLite `strategy` record, and the
+dashboard overview. Alongside the phase, posture, threat, and mission targets it
+carries the sweep state — `sweeping`, `armada_mode`, `armada_gathered`,
+`armada_target`, `armada_anchor`, `sweep_chunk`, `sweep_committed_tick`, and
+`sweep_abandoned_chunks` — so a stalled sweep is visible without reading the
+Turn diagnostics line.

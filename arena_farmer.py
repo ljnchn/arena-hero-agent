@@ -244,6 +244,8 @@ ARMADA_PROBE_LATERAL_OFFSET = 4
 ARMADA_CONTACT_RADIUS = 8
 ARMADA_GATHER_TIMEOUT_TICKS = 12
 ARMADA_GATHER_MIN_READY_UNITS = 4
+ARMADA_SWEEP_COMMIT_TICKS = 64
+ARMADA_SWEEP_ABANDON_TTL = 512
 
 Position = tuple[int, int]
 
@@ -2522,6 +2524,8 @@ class CoreFarmer:
         self.armada_target_position: Position | None = None
         self.armada_anchor_position: Position | None = None
         self.armada_sweep_chunk: Position | None = None
+        self.armada_sweep_committed_tick: int | None = None
+        self.armada_sweep_abandoned: dict[Position, int] = {}
         self.armada_gathered: bool = False
         self.armada_gather_started_tick: int | None = None
         self.armada_mode = "GATHER"
@@ -3092,6 +3096,17 @@ class CoreFarmer:
     def recovery_mode(self) -> bool:
         return self.recovery_until_tick > 0
 
+    def armada_sweeping(self, turn: Turn) -> bool:
+        """The gathered armada is marching a sweep leg rather than a named target."""
+        return bool(
+            turn.core is not None
+            and not self.compatibility_hold
+            and not self.recovery_mode
+            and self.armada_gathered
+            and self.isolated_core_target_id is None
+            and self.stationary_unit_target_id is None
+        )
+
     def strategy_phase(self, turn: Turn) -> str:
         if turn.core is None:
             return "RESPAWNING"
@@ -3104,6 +3119,10 @@ class CoreFarmer:
             or self.stationary_unit_target_id is not None
         ):
             return "ASSAULT"
+        # A gathered armada sweeps while production continues, so the sweep
+        # outranks the mobilization labels instead of hiding behind them.
+        if self.armada_sweeping(turn):
+            return "ARMADA_SWEEP"
         next_unit = _next_force_unit_type(
             self.worker_target,
             len(turn.workers),
@@ -3117,6 +3136,56 @@ class CoreFarmer:
         if self.beacon_runner_id is not None:
             return "BEACON_CAMPAIGN"
         return "EXPAND_CONTROL"
+
+    def strategy_summary(self, turn: Turn) -> dict[str, object]:
+        """Aggregate every active strategy layer, sweep included, for reporting."""
+        return {
+            "phase": self.strategy_phase(turn),
+            "posture": self.threat_assessment.global_posture.value,
+            "threat": self.threat_assessment.level.value,
+            "threat_reason": self.threat_assessment.primary_reason,
+            "core_target": (
+                str(self.isolated_core_target_id)
+                if self.isolated_core_target_id
+                else None
+            ),
+            "unit_target": (
+                str(self.stationary_unit_target_id)
+                if self.stationary_unit_target_id
+                else None
+            ),
+            "beacon_runner": (
+                str(self.beacon_runner_id) if self.beacon_runner_id else None
+            ),
+            "sweeping": self.armada_sweeping(turn),
+            "armada_mode": self.armada_mode,
+            "armada_gathered": self.armada_gathered,
+            "armada_target": (
+                list(self.armada_target_position)
+                if self.armada_target_position is not None
+                else None
+            ),
+            "armada_anchor": (
+                list(self.armada_anchor_position)
+                if self.armada_anchor_position is not None
+                else None
+            ),
+            "sweep_chunk": (
+                list(self.armada_sweep_chunk)
+                if self.armada_sweep_chunk is not None
+                else None
+            ),
+            "sweep_committed_tick": self.armada_sweep_committed_tick,
+            "sweep_abandoned_chunks": len(self.armada_sweep_abandoned),
+            "manual_orders": list(self.manual_order_ids),
+            "expedition_members": {
+                str(expedition_id): [
+                    str(unit_id)
+                    for unit_id in sorted(member_ids, key=lambda item: item.bytes)
+                ]
+                for expedition_id, member_ids in self.expedition_members.items()
+            },
+        }
 
     def _refresh_compatibility_hold(self) -> None:
         if self.compatibility_marker is None:
@@ -4216,6 +4285,9 @@ class CoreFarmer:
         self.scout_target_last_visited.clear()
         self.scout_claims.clear()
         self.scout_chunk_last_seen.clear()
+        self.armada_sweep_chunk = None
+        self.armada_sweep_committed_tick = None
+        self.armada_sweep_abandoned.clear()
         self.enemy_unit_sightings.clear()
         self.enemy_unit_motion.clear()
         self.active_enemy_ids.clear()
@@ -5528,16 +5600,28 @@ class CoreFarmer:
             ),
         ).id
 
+    def _armada_chunk_cleared(self, turn: Turn, chunk: Position) -> bool:
+        """A controlled Unit is standing in this chunk, so the leg is finished."""
+        last_seen = self.scout_chunk_last_seen.get(chunk)
+        return last_seen is not None and turn.tick - last_seen <= 0
+
     def _armada_sweep_target(self, turn: Turn) -> Position:
         core = turn.core
         core_pos = self.armada_anchor_position or (
             core.position if core is not None else (0, 0)
         )
 
+        for chunk, tick in tuple(self.armada_sweep_abandoned.items()):
+            if turn.tick - tick > ARMADA_SWEEP_ABANDON_TTL:
+                self.armada_sweep_abandoned.pop(chunk, None)
+
         # Every visited chunk contributes its surrounding frontier.  Unlike the
         # old fixed 8x8 box, this grows for as long as the alliance keeps moving.
+        # The anchor's own neighbourhood seeds the set so a fleet that starts far
+        # from the world origin still has somewhere to march before it has
+        # explored anything.
         candidate_chunks: set[Position] = {(-1, -1), (-1, 0), (0, -1), (0, 0)}
-        for chunk in self.scout_chunk_last_seen:
+        for chunk in (_chunk_coordinates(core_pos), *self.scout_chunk_last_seen):
             cx, cy = chunk
             candidate_chunks.add(chunk)
             candidate_chunks.update(
@@ -5548,31 +5632,56 @@ class CoreFarmer:
                     (cx, cy + 1),
                 }
             )
-        candidate_chunks.update(
+        core_chunks = {
             _chunk_coordinates(sighting.position)
             for sighting in self.stationary_core_memory.values()
-        )
+        }
+        candidate_chunks.update(core_chunks)
 
-        def chunk_score(chunk: Position) -> tuple[int, int, int]:
+        def chunk_score(chunk: Position) -> tuple[int, int, int, int]:
             cx, cy = chunk
             chunk_center = (cx * 32 + 16, cy * 32 + 16)
-            has_enemy_core = any(
-                (
-                    sighting.position[0] // 32 == cx
-                    and sighting.position[1] // 32 == cy
-                )
-                for sighting in self.stationary_core_memory.values()
-            )
             last_seen = self.scout_chunk_last_seen.get(chunk, -10000)
             age = turn.tick - last_seen
             dist = _distance(core_pos, chunk_center)
             return (
-                0 if has_enemy_core else 1,
+                0 if chunk in core_chunks else 1,
+                1 if chunk in self.armada_sweep_abandoned else 0,
                 -age,
                 dist,
             )
 
         best_chunk = min(candidate_chunks, key=chunk_score)
+
+        # Hold the running sweep chunk until the fleet actually reaches it.  The
+        # march keeps revealing new frontier neighbours, and re-scoring from
+        # scratch every Tick made the armada swing sideways instead of arriving.
+        # An enemy Core sighting still preempts the commitment immediately.
+        current = self.armada_sweep_chunk
+        if (
+            current is not None
+            and current in candidate_chunks
+            and chunk_score(current)[:2] <= chunk_score(best_chunk)[:2]
+            and not self._armada_chunk_cleared(turn, current)
+        ):
+            committed_tick = self.armada_sweep_committed_tick
+            if (
+                committed_tick is not None
+                and turn.tick - committed_tick >= ARMADA_SWEEP_COMMIT_TICKS
+            ):
+                # Unreachable or contested: park it and let the scorer move on,
+                # so a blocked chunk can never stall the sweep forever.
+                self.armada_sweep_abandoned[current] = turn.tick
+                best_chunk = min(candidate_chunks, key=chunk_score)
+                self.armada_sweep_committed_tick = turn.tick
+            else:
+                best_chunk = current
+
+        if (
+            best_chunk != self.armada_sweep_chunk
+            or self.armada_sweep_committed_tick is None
+        ):
+            self.armada_sweep_committed_tick = turn.tick
         self.armada_sweep_chunk = best_chunk
         cx, cy = best_chunk
         return (cx * 32 + 16, cy * 32 + 16)
@@ -6038,6 +6147,18 @@ class CoreFarmer:
         )
         unit_type = getattr(unit, "unit_type", None)
 
+        # Every branch has to leave a formation slot behind: the rally below
+        # pulls back a unit that outran the centroid and reads `forward`/`spread`
+        # whatever the mode was.  SIEGE and COLUMN used to leave them unbound and
+        # raise UnboundLocalError out of the whole Turn.
+        width = 7 if unit_type is UnitType.VANGUARD else 5
+        spread = (global_index % width) - width // 2
+        forward = (
+            ARMADA_FORMATION_FRONT_OFFSET - abs(spread) // 3
+            if unit_type is UnitType.VANGUARD
+            else -ARMADA_FORMATION_BACK_OFFSET
+        )
+
         if self.armada_mode == "SIEGE":
             vectors = (
                 ((0, -1), (1, 0), (0, 1), (-1, 0))
@@ -6051,9 +6172,13 @@ class CoreFarmer:
                 else min(3, 2 + global_index // len(vectors))
             )
             formation_target = (target[0] + vx * ring, target[1] + vy * ring)
+            # Keep the assigned side of the ring when rallying back.
+            forward = (vx * dx + vy * dy) * ring
+            spread = (vx * px + vy * py) * ring
         elif self.armada_mode == "COLUMN":
             lateral = -1 if global_index % 2 == 0 else 0
             forward = 1 if unit_type is UnitType.VANGUARD else -1
+            spread = lateral
             depth = (global_index // 2) % 3
             if _distance(centroid, target) <= 6:
                 formation_target = (
@@ -6067,8 +6192,6 @@ class CoreFarmer:
                     centroid[1] + dy * lead + py * lateral,
                 )
         elif self.armada_mode == "CONTACT":
-            width = 7 if unit_type is UnitType.VANGUARD else 5
-            spread = (global_index % width) - width // 2
             forward = 1 if unit_type is UnitType.VANGUARD else -1
             if _distance(centroid, target) <= 6:
                 if unit_type is UnitType.VANGUARD:
@@ -6088,12 +6211,6 @@ class CoreFarmer:
                     centroid[1] + dy * lead + py * spread,
                 )
         else:
-            width = 7 if unit_type is UnitType.VANGUARD else 5
-            spread = (global_index % width) - width // 2
-            if unit_type is UnitType.VANGUARD:
-                forward = ARMADA_FORMATION_FRONT_OFFSET - abs(spread) // 3
-            else:
-                forward = -ARMADA_FORMATION_BACK_OFFSET
             if _distance(centroid, target) <= 6:
                 formation_target = (
                     target[0] + dx * forward + px * spread,
@@ -8783,6 +8900,9 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"armada_mode={tactic.armada_mode} "
         f"armada_target_distance={armada_target_distance} "
         f"armada_gather_started={tactic.armada_gather_started_tick if tactic.armada_gather_started_tick is not None else 'none'} "
+        f"armada_sweep_chunk={f'{tactic.armada_sweep_chunk[0]}:{tactic.armada_sweep_chunk[1]}' if tactic.armada_sweep_chunk is not None else 'none'} "
+        f"armada_sweep_committed={tactic.armada_sweep_committed_tick if tactic.armada_sweep_committed_tick is not None else 'none'} "
+        f"armada_sweep_abandoned={len(tactic.armada_sweep_abandoned)} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "
         f"threat_level={tactic.threat_assessment.level.value} "
@@ -8856,11 +8976,18 @@ def _systemd_status(turn: Turn, tactic: CoreFarmer, accepted_tick: int) -> str:
         )
         core_health = f"core_hp {core.hp}; core_shield {core.shield}"
     tuning_generation = os.environ.get("ARENA_TUNING_GENERATION", "0").strip() or "0"
+    sweep_chunk = tactic.armada_sweep_chunk
+    sweep_status = (
+        f"{sweep_chunk[0]}:{sweep_chunk[1]}" if sweep_chunk is not None else "none"
+    )
     return (
         f"STATUS=tick {accepted_tick}; resources {turn.resources}/"
         f"{turn.resource_capacity}; workers {len(turn.workers)}; "
         f"fleet {len(turn.vanguards)}v/{len(turn.rangers)}r; "
         f"phase {tactic.strategy_phase(turn)}; {core_status}; "
+        f"armada {tactic.armada_mode}; "
+        f"armada_gathered {int(tactic.armada_gathered)}; "
+        f"sweep_chunk {sweep_status}; "
         f"posture {tactic.threat_assessment.global_posture.value}; "
         f"threat {tactic.threat_assessment.level.value}; "
         f"threat_reason {tactic.threat_assessment.primary_reason}; "
@@ -9121,38 +9248,7 @@ def play(
                             turn,
                             allied_object_ids=tuple(tactic.allied_object_ids),
                             allied_usernames=tuple(tactic.allied_usernames),
-                            strategy={
-                                "phase": tactic.strategy_phase(turn),
-                                "posture": tactic.threat_assessment.global_posture.value,
-                                "threat": tactic.threat_assessment.level.value,
-                                "threat_reason": tactic.threat_assessment.primary_reason,
-                                "core_target": (
-                                    str(tactic.isolated_core_target_id)
-                                    if tactic.isolated_core_target_id
-                                    else None
-                                ),
-                                "unit_target": (
-                                    str(tactic.stationary_unit_target_id)
-                                    if tactic.stationary_unit_target_id
-                                    else None
-                                ),
-                                "beacon_runner": (
-                                    str(tactic.beacon_runner_id)
-                                    if tactic.beacon_runner_id
-                                    else None
-                                ),
-                                "manual_orders": list(tactic.manual_order_ids),
-                                "expedition_members": {
-                                    str(expedition_id): [
-                                        str(unit_id)
-                                        for unit_id in sorted(
-                                            member_ids,
-                                            key=lambda item: item.bytes,
-                                        )
-                                    ]
-                                    for expedition_id, member_ids in tactic.expedition_members.items()
-                                },
-                            },
+                            strategy=tactic.strategy_summary(turn),
                         )
                     except (OSError, sqlite3.Error) as exc:
                         print(

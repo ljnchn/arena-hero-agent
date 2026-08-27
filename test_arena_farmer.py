@@ -28,6 +28,7 @@ from arena_farmer import (
     AllianceEnemyCoreSighting,
     AllianceEnemyUnitSighting,
     AllianceRosterClient,
+    ARMADA_SWEEP_COMMIT_TICKS,
     CoreRaidTarget,
     CoreFarmer,
     EnemyCoreSighting,
@@ -802,6 +803,246 @@ class AllianceCoordinatorTests(unittest.TestCase):
 
         chunk = (target[0] // 32, target[1] // 32)
         self.assertTrue(chunk[0] in {-5, 4} or chunk[1] in {-5, 4})
+
+    def test_armada_sweep_holds_its_chunk_until_the_fleet_arrives(self) -> None:
+        tactic = CoreFarmer()
+        tactic.scout_chunk_last_seen = {(0, 0): 100}
+        tactic.armada_anchor_position = (16, 16)
+        turn = make_turn(tick=100, core_position=(0, 0))
+
+        first = tactic._armada_sweep_target(turn)
+        committed = tactic.armada_sweep_chunk
+        self.assertIsNotNone(committed)
+
+        # The march reveals a nearer unexplored frontier every Tick.  Re-scoring
+        # from scratch would grab it and swing the fleet sideways for ever, so
+        # the running leg has to survive the newly reachable neighbours.
+        tactic.scout_chunk_last_seen[(5, 5)] = 101
+        tactic.armada_anchor_position = (5 * 32 + 16, 5 * 32 + 16)
+        held = tactic._armada_sweep_target(
+            make_turn(tick=101, core_position=(0, 0))
+        )
+
+        self.assertEqual(tactic.armada_sweep_chunk, committed)
+        self.assertEqual(held, first)
+
+    def test_armada_sweep_still_diverts_to_a_sighted_enemy_core(self) -> None:
+        tactic = CoreFarmer()
+        tactic.scout_chunk_last_seen = {(0, 0): 100}
+        tactic._armada_sweep_target(make_turn(tick=100, core_position=(0, 0)))
+        committed = tactic.armada_sweep_chunk
+
+        tactic.stationary_core_memory[UUID(ENEMY_1)] = EnemyCoreSighting(
+            position=(80, 80),
+            first_tick=101,
+            last_tick=101,
+            observations=1,
+        )
+        target = tactic._armada_sweep_target(
+            make_turn(tick=101, core_position=(0, 0))
+        )
+
+        self.assertNotEqual(tactic.armada_sweep_chunk, committed)
+        self.assertEqual(target, (80, 80))
+
+    def test_armada_sweep_advances_once_the_committed_chunk_is_cleared(self) -> None:
+        tactic = CoreFarmer()
+        turn = make_turn(tick=100, core_position=(0, 0))
+        tactic._armada_sweep_target(turn)
+        committed = tactic.armada_sweep_chunk
+        self.assertIsNotNone(committed)
+
+        # Standing in the chunk marks it swept, so the next leg must differ.
+        cleared_turn = make_turn(tick=101, core_position=(0, 0))
+        tactic.scout_chunk_last_seen[committed] = 101
+        tactic._armada_sweep_target(cleared_turn)
+
+        self.assertNotEqual(tactic.armada_sweep_chunk, committed)
+
+    def test_armada_sweep_abandons_a_chunk_it_never_reaches(self) -> None:
+        tactic = CoreFarmer()
+        tactic._armada_sweep_target(make_turn(tick=100, core_position=(0, 0)))
+        stuck = tactic.armada_sweep_chunk
+        self.assertIsNotNone(stuck)
+
+        # The fleet never arrives: no Tick ever stamps the chunk as seen.
+        blocked_tick = 100 + ARMADA_SWEEP_COMMIT_TICKS
+        tactic._armada_sweep_target(
+            make_turn(tick=blocked_tick, core_position=(0, 0))
+        )
+
+        self.assertIn(stuck, tactic.armada_sweep_abandoned)
+        self.assertNotEqual(tactic.armada_sweep_chunk, stuck)
+        self.assertEqual(tactic.armada_sweep_committed_tick, blocked_tick)
+
+    def test_armada_sweep_target_survives_an_anchor_far_from_the_origin(self) -> None:
+        tactic = CoreFarmer()
+        turn = make_turn(tick=100, core_position=(4000, -4000))
+        tactic.armada_anchor_position = (4000, -4000)
+
+        target = tactic._armada_sweep_target(turn)
+
+        self.assertLessEqual(_distance((4000, -4000), target), 64)
+
+    def test_strategy_phase_reports_armada_sweep_while_the_fleet_marches(self) -> None:
+        vanguards = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (i, 0))
+            for i in range(1, 7)
+        ]
+        rangers = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, i))
+            for i in range(1, 7)
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=100, core_position=(0, 0), units=vanguards + rangers)
+
+        tactic.choose_actions(turn)
+
+        self.assertTrue(tactic.armada_gathered)
+        self.assertTrue(tactic.armada_sweeping(turn))
+        self.assertEqual(tactic.strategy_phase(turn), "ARMADA_SWEEP")
+
+        summary = tactic.strategy_summary(turn)
+        self.assertEqual(summary["phase"], "ARMADA_SWEEP")
+        self.assertTrue(summary["sweeping"])
+        self.assertTrue(summary["armada_gathered"])
+        self.assertEqual(summary["armada_mode"], tactic.armada_mode)
+        self.assertEqual(summary["sweep_chunk"], list(tactic.armada_sweep_chunk))
+        self.assertEqual(summary["armada_target"], list(tactic.armada_target_position))
+
+    def test_strategy_phase_keeps_assault_ahead_of_the_sweep(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=100, core_position=(0, 0))
+        tactic.armada_gathered = True
+        tactic.isolated_core_target_id = UUID(ENEMY_1)
+
+        self.assertFalse(tactic.armada_sweeping(turn))
+        self.assertEqual(tactic.strategy_phase(turn), "ASSAULT")
+
+    def test_systemd_status_reports_the_sweep_leg(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=100, core_position=(0, 0))
+        tactic.armada_gathered = True
+        tactic.armada_mode = "SEARCH"
+        tactic.armada_sweep_chunk = (3, -2)
+
+        status = _systemd_status(turn, tactic, 100)
+
+        self.assertIn("phase ARMADA_SWEEP", status)
+        self.assertIn("armada SEARCH", status)
+        self.assertIn("sweep_chunk 3:-2", status)
+
+    def test_armada_keeps_sweeping_new_ground_without_any_prompting(self) -> None:
+        """The sweep must never settle: coverage has to grow on its own."""
+        units_map = {
+            f"00000000-0000-4000-8000-{i:012x}": ("VANGUARD", (1, i))
+            for i in range(1, 8)
+        }
+        units_map.update(
+            {
+                f"00000000-0000-4000-8000-{100 + i:012x}": ("RANGER", (0, i))
+                for i in range(1, 8)
+            }
+        )
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        deltas = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+        midpoint_coverage = 0
+        midpoint_reach = 0
+
+        for tick in range(100, 450):
+            turn = make_turn(
+                tick=tick,
+                core_position=(0, 0),
+                units=[
+                    unit(uid, unit_type, position)
+                    for uid, (unit_type, position) in units_map.items()
+                ],
+            )
+            tactic.choose_actions(turn)
+            actions = turn.plan.model_dump(mode="json", exclude_none=True).get(
+                "unit_actions",
+                {},
+            )
+            for uid, action in actions.items():
+                if action.get("type") != "MOVE" or uid not in units_map:
+                    continue
+                dx, dy = deltas.get(action.get("direction"), (0, 0))
+                unit_type, (ux, uy) = units_map[uid]
+                units_map[uid] = (unit_type, (ux + dx, uy + dy))
+            if tick == 350:
+                midpoint_coverage = len(tactic.scout_chunk_last_seen)
+                midpoint_reach = max(
+                    _distance((0, 0), position)
+                    for _, position in units_map.values()
+                )
+
+        final_reach = max(
+            _distance((0, 0), position) for _, position in units_map.values()
+        )
+        self.assertTrue(tactic.armada_gathered)
+        self.assertEqual(tactic.strategy_phase(turn), "ARMADA_SWEEP")
+        # Both halves of the run have to add ground.  A sweep that re-scored its
+        # chunk every Tick used to dither in place and freeze here instead.
+        self.assertGreater(midpoint_coverage, 8)
+        self.assertGreater(len(tactic.scout_chunk_last_seen), midpoint_coverage)
+        self.assertGreater(final_reach, midpoint_reach)
+
+    def _outrunner_armada(self) -> tuple[CoreFarmer, Turn, object]:
+        """A gathered armada whose front Vanguard has outrun the centroid."""
+        vanguard_positions = [(-1, 0), (-2, 0), (0, -1), (0, 1), (-1, 1), (-1, -1)]
+        ranger_positions = [(-2, 1), (-2, -1), (-3, 0), (0, 2), (0, -2), (-3, 1)]
+        units = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", position)
+            for i, position in enumerate(vanguard_positions, 1)
+        ]
+        units.extend(
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", position)
+            for i, position in enumerate(ranger_positions, 1)
+        )
+        units.append(
+            unit("00000000-0000-4000-8000-0000000000ff", "VANGUARD", (6, 0))
+        )
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(tick=100, core_position=(0, 0), units=units)
+        outrunner = next(
+            candidate
+            for candidate in turn.vanguards
+            if str(candidate.id).endswith("ff")
+        )
+        return tactic, turn, outrunner
+
+    def test_column_rally_survives_a_unit_that_outran_the_fleet(self) -> None:
+        tactic, turn, outrunner = self._outrunner_armada()
+        tactic.known_obstacles.update({(1, -2), (1, -1), (1, 0), (1, 1), (1, 2)})
+
+        target = tactic._combat_patrol_target(
+            turn,
+            outrunner,
+            6,
+            strategic_target=(20, 0),
+        )
+
+        self.assertEqual(tactic.armada_mode, "COLUMN")
+        self.assertNotIn(target, tactic.known_obstacles)
+
+    def test_siege_rally_survives_a_unit_that_outran_the_fleet(self) -> None:
+        tactic, turn, outrunner = self._outrunner_armada()
+        tactic.stationary_core_memory[UUID(ENEMY_1)] = EnemyCoreSighting(
+            position=(6, 0),
+            first_tick=100,
+            last_tick=100,
+            observations=3,
+        )
+
+        target = tactic._combat_patrol_target(
+            turn,
+            outrunner,
+            6,
+            strategic_target=(6, 0),
+        )
+
+        self.assertEqual(tactic.armada_mode, "SIEGE")
+        self.assertNotIn(target, tactic.known_obstacles)
 
     def test_armada_uses_column_when_obstacles_fill_forward_footprint(self) -> None:
         tactic = CoreFarmer()

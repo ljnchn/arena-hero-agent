@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file. The format 
 - Gameplay v0.14 and official SDK 0.2.9 compatibility, including dynamic Unit-price boundary tests and authoritative spawn-cost reconciliation.
 - Bounded SQLite Turn history and a local tactical dashboard with historical
   vision, unit trails, enemy Core memory, events, and public leaderboards.
+- The armada sweep is now part of the aggregated strategy summary: `strategy_phase()`
+  reports `ARMADA_SWEEP`, and a new `strategy_summary()` feeds the sweep chunk,
+  commitment Tick, formation mode, and gather state to systemd status, SQLite
+  history, and the dashboard.
 
 ### Changed
 
@@ -32,6 +36,18 @@ All notable changes to this project will be documented in this file. The format 
 - Visible hostile Cores are immediate priority targets, non-guard combat Units
   patrol an expanding perimeter, and a strong healthy force contests the Beacon.
 - All production paths use the SDK's current `unit_cost()` preview while preserving operational reserves. Obsolete upkeep diagnostics and alerts are replaced by settled spawn cost, required-price, and repeated affordability-failure telemetry.
+
+### Fixed
+
+- The armada no longer crashes the Agent mid-Turn. Rallying a Unit that outran
+  the fleet centroid read formation offsets that the `SIEGE` and `COLUMN`
+  branches never assigned, raising `UnboundLocalError` out of `choose_actions()`
+  and terminating the process the moment a sweep entered an obstacle corridor or
+  besieged a Core.
+- The armada sweep no longer stalls. A sweep leg is committed until the fleet
+  reaches the chunk instead of being re-scored every Tick, unreachable chunks are
+  abandoned after a bounded window, and the candidate set is seeded from the
+  armada anchor so a fleet far from the world origin still has a legal target.
 
 ## [0.1.0] - 2026-08-03
 
