@@ -29,6 +29,8 @@ from arena_farmer import (
     AllianceEnemyUnitSighting,
     AllianceRosterClient,
     ARMADA_SWEEP_COMMIT_TICKS,
+    ARMADA_SWEEP_WINGS,
+    ARMADA_WING_SEPARATION,
     ARMADA_ADVANCE_STALL_TICKS,
     CoreRaidTarget,
     CoreFarmer,
@@ -1214,6 +1216,76 @@ class AllianceCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(tactic.armada_breakout_until_tick, 0)
 
+    def test_sweeping_armada_splits_into_separated_wings(self) -> None:
+        units_map = {
+            f"00000000-0000-4000-8000-{i:012x}": ("VANGUARD", (1, i))
+            for i in range(1, 9)
+        }
+        units_map.update(
+            {
+                f"00000000-0000-4000-8000-{100 + i:012x}": ("RANGER", (0, i))
+                for i in range(1, 9)
+            }
+        )
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        deltas = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+
+        # The fleet has to actually march: separation only has room to matter
+        # once the explored frontier is wider than the separation radius.
+        for tick in range(100, 260):
+            turn = make_turn(
+                tick=tick,
+                core_position=(0, 0),
+                units=[
+                    unit(uid, unit_type, position)
+                    for uid, (unit_type, position) in units_map.items()
+                ],
+            )
+            tactic.choose_actions(turn)
+            actions = turn.plan.model_dump(mode="json", exclude_none=True).get(
+                "unit_actions",
+                {},
+            )
+            for uid, action in actions.items():
+                if action.get("type") != "MOVE" or uid not in units_map:
+                    continue
+                dx, dy = deltas.get(action.get("direction"), (0, 0))
+                unit_type, (ux, uy) = units_map[uid]
+                units_map[uid] = (unit_type, (ux + dx, uy + dy))
+
+        legs = tactic.armada_wing_chunks
+        self.assertEqual(len(legs), ARMADA_SWEEP_WINGS)
+        first, second = legs[0], legs[1]
+        separation = max(abs(first[0] - second[0]), abs(first[1] - second[1]))
+        self.assertGreater(separation, ARMADA_WING_SEPARATION)
+
+    def test_armada_reforms_as_one_fleet_when_there_is_something_to_fight(self) -> None:
+        vanguards = [
+            unit(f"00000000-0000-4000-8000-{i:012x}", "VANGUARD", (1, i))
+            for i in range(1, 9)
+        ]
+        rangers = [
+            unit(f"00000000-0000-4000-8000-{100 + i:012x}", "RANGER", (0, i))
+            for i in range(1, 9)
+        ]
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=100,
+            core_position=(0, 0),
+            units=vanguards + rangers,
+            enemies=[unit(ENEMY_1, "RANGER", (9, 4), controlled=False)],
+        )
+
+        anchors = {
+            tactic._combat_patrol_target(turn, candidate, index)
+            and tactic.armada_anchor_position
+            for index, candidate in enumerate(turn.vanguards)
+        }
+
+        # One hostile is enough to collapse the wings back into a single anchor,
+        # so the fleet never trickles into a fight in halves.
+        self.assertEqual(len(anchors), 1)
+
     def test_armada_uses_column_when_obstacles_fill_forward_footprint(self) -> None:
         tactic = CoreFarmer()
         tactic.known_obstacles.update({(1, -1), (1, 0), (1, 1), (2, 0)})
@@ -1411,11 +1483,13 @@ class AllianceCoordinatorTests(unittest.TestCase):
 
         turn = make_turn(tick=110, core_position=(0, 0), beacon_position=(100, 0), units=[unit(uid, utype, pos) for uid, (utype, pos) in units_map.items()])
         guards = _core_guard_ids(turn)
-        armada_v_xs = [pos[0] for uid, (utype, pos) in units_map.items() if utype == "VANGUARD" and UUID(uid) not in guards[0]]
-        armada_r_xs = [pos[0] for uid, (utype, pos) in units_map.items() if utype == "RANGER" and UUID(uid) not in guards[1]]
-        # Active armada expedition units should advance eastward significantly
-        self.assertGreaterEqual(max(armada_v_xs), 5)
-        self.assertGreaterEqual(max(armada_r_xs), 3)
+        armada_v = [pos for uid, (utype, pos) in units_map.items() if utype == "VANGUARD" and UUID(uid) not in guards[0]]
+        armada_r = [pos for uid, (utype, pos) in units_map.items() if utype == "RANGER" and UUID(uid) not in guards[1]]
+        # Active armada expedition units advance well clear of the Core.  The
+        # heading depends on which frontier chunk scores best and is not fixed to
+        # one axis, so distance travelled is what matters here.
+        self.assertGreaterEqual(max(_distance((0, 0), pos) for pos in armada_v), 5)
+        self.assertGreaterEqual(max(_distance((0, 0), pos) for pos in armada_r), 3)
 
     def test_armada_vanguard_charges_nearby_enemy(self) -> None:
         # 6 Vanguards near core so armada is gathered

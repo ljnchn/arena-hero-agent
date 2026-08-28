@@ -249,6 +249,8 @@ ARMADA_SWEEP_ABANDON_TTL = 512
 ARMADA_ADVANCE_STALL_TICKS = 12
 ARMADA_BREAKOUT_TICKS = 16
 ARMADA_ADVANCE_ARRIVED_RADIUS = 8
+ARMADA_SWEEP_WINGS = 2
+ARMADA_WING_SEPARATION = 2
 
 Position = tuple[int, int]
 
@@ -2529,6 +2531,8 @@ class CoreFarmer:
         self.armada_sweep_chunk: Position | None = None
         self.armada_sweep_committed_tick: int | None = None
         self.armada_sweep_abandoned: dict[Position, int] = {}
+        self.armada_wing_chunks: dict[int, Position] = {}
+        self.armada_wing_committed: dict[int, int] = {}
         self.armada_advance_target: Position | None = None
         self.armada_advance_best_distance: int | None = None
         self.armada_advance_progress_tick: int | None = None
@@ -3188,6 +3192,10 @@ class CoreFarmer:
             ),
             "sweep_committed_tick": self.armada_sweep_committed_tick,
             "sweep_abandoned_chunks": len(self.armada_sweep_abandoned),
+            "sweep_wings": {
+                str(wing): list(chunk)
+                for wing, chunk in sorted(self.armada_wing_chunks.items())
+            },
             "advance_best_distance": self.armada_advance_best_distance,
             "advance_progress_tick": self.armada_advance_progress_tick,
             "breakout_until_tick": self.armada_breakout_until_tick,
@@ -4302,6 +4310,8 @@ class CoreFarmer:
         self.armada_sweep_chunk = None
         self.armada_sweep_committed_tick = None
         self.armada_sweep_abandoned.clear()
+        self.armada_wing_chunks.clear()
+        self.armada_wing_committed.clear()
         self._reset_armada_advance_progress()
         self.armada_breakout_until_tick = 0
         self.enemy_unit_sightings.clear()
@@ -5673,7 +5683,7 @@ class CoreFarmer:
             self.armada_advance_best_distance = distance
             self.armada_advance_progress_tick = turn.tick
 
-    def _armada_sweep_target(self, turn: Turn) -> Position:
+    def _armada_sweep_target(self, turn: Turn, wing: int = 0) -> Position:
         core = turn.core
         core_pos = self.armada_anchor_position or (
             core.position if core is not None else (0, 0)
@@ -5683,22 +5693,13 @@ class CoreFarmer:
             if turn.tick - tick > ARMADA_SWEEP_ABANDON_TTL:
                 self.armada_sweep_abandoned.pop(chunk, None)
 
-        # Every visited chunk contributes its surrounding frontier.  Unlike the
-        # old fixed 8x8 box, this grows for as long as the alliance keeps moving.
-        # The anchor's own neighbourhood seeds the set so a fleet that starts far
-        # from the world origin still has somewhere to march before it has
-        # explored anything.
+        anchor_chunk = _chunk_coordinates(core_pos)
         candidate_chunks: set[Position] = {(-1, -1), (-1, 0), (0, -1), (0, 0)}
-        for chunk in (_chunk_coordinates(core_pos), *self.scout_chunk_last_seen):
+        for chunk in (anchor_chunk, *self.scout_chunk_last_seen):
             cx, cy = chunk
             candidate_chunks.add(chunk)
             candidate_chunks.update(
-                {
-                    (cx - 1, cy),
-                    (cx + 1, cy),
-                    (cx, cy - 1),
-                    (cx, cy + 1),
-                }
+                {(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)}
             )
         core_chunks = {
             _chunk_coordinates(sighting.position)
@@ -5706,7 +5707,16 @@ class CoreFarmer:
         }
         candidate_chunks.update(core_chunks)
 
-        def chunk_score(chunk: Position) -> tuple[int, int, int, int]:
+        # Sweep coverage is bounded by how far the fleet can walk, so the only
+        # way to widen it is to walk in more than one place at once.  Each wing
+        # keeps its own leg and refuses the legs its siblings already hold.
+        taken = {
+            held
+            for other, held in self.armada_wing_chunks.items()
+            if other != wing
+        }
+
+        def chunk_score(chunk: Position) -> tuple[int, int, int, int, int, Position]:
             cx, cy = chunk
             chunk_center = (cx * 32 + 16, cy * 32 + 16)
             last_seen = self.scout_chunk_last_seen.get(chunk, -10000)
@@ -5715,24 +5725,37 @@ class CoreFarmer:
             return (
                 0 if chunk in core_chunks else 1,
                 1 if chunk in self.armada_sweep_abandoned else 0,
+                # Wings must not merely avoid each other's exact leg: adjacent
+                # legs put both halves on the same ground and the split buys
+                # nothing, so keep a whole chunk of separation between them.
+                1
+                if any(
+                    max(abs(cx - hx), abs(cy - hy)) <= ARMADA_WING_SEPARATION
+                    for hx, hy in taken
+                )
+                else 0,
                 -age,
                 dist,
+                # Deterministic last resort.  Ties used to fall through to set
+                # iteration order, so the fleet's heading flipped whenever the
+                # candidate set changed shape.
+                chunk,
             )
 
         best_chunk = min(candidate_chunks, key=chunk_score)
 
-        # Hold the running sweep chunk until the fleet actually reaches it.  The
+        # Hold the running sweep chunk until the wing actually reaches it.  The
         # march keeps revealing new frontier neighbours, and re-scoring from
         # scratch every Tick made the armada swing sideways instead of arriving.
         # An enemy Core sighting still preempts the commitment immediately.
-        current = self.armada_sweep_chunk
+        current = self.armada_wing_chunks.get(wing)
         if (
             current is not None
             and current in candidate_chunks
-            and chunk_score(current)[:2] <= chunk_score(best_chunk)[:2]
+            and chunk_score(current)[:3] <= chunk_score(best_chunk)[:3]
             and not self._armada_chunk_cleared(turn, current)
         ):
-            committed_tick = self.armada_sweep_committed_tick
+            committed_tick = self.armada_wing_committed.get(wing)
             if (
                 committed_tick is not None
                 and turn.tick - committed_tick >= ARMADA_SWEEP_COMMIT_TICKS
@@ -5741,16 +5764,20 @@ class CoreFarmer:
                 # so a blocked chunk can never stall the sweep forever.
                 self.armada_sweep_abandoned[current] = turn.tick
                 best_chunk = min(candidate_chunks, key=chunk_score)
-                self.armada_sweep_committed_tick = turn.tick
+                self.armada_wing_committed[wing] = turn.tick
             else:
                 best_chunk = current
 
         if (
-            best_chunk != self.armada_sweep_chunk
-            or self.armada_sweep_committed_tick is None
+            best_chunk != self.armada_wing_chunks.get(wing)
+            or self.armada_wing_committed.get(wing) is None
         ):
-            self.armada_sweep_committed_tick = turn.tick
-        self.armada_sweep_chunk = best_chunk
+            self.armada_wing_committed[wing] = turn.tick
+        self.armada_wing_chunks[wing] = best_chunk
+        if wing == 0:
+            # Wing 0 keeps driving the reported sweep state.
+            self.armada_sweep_chunk = best_chunk
+            self.armada_sweep_committed_tick = self.armada_wing_committed[wing]
         cx, cy = best_chunk
         return (cx * 32 + 16, cy * 32 + 16)
 
@@ -5759,6 +5786,7 @@ class CoreFarmer:
         turn: Turn,
         isolated_core_target: object | None = None,
         stationary_unit_target: object | None = None,
+        wing: int = 0,
     ) -> Position:
         if isolated_core_target is not None:
             return isolated_core_target.position
@@ -5824,7 +5852,7 @@ class CoreFarmer:
             and _distance(turn.core.position, turn.beacon.position) <= 256
         ):
             return turn.beacon.position
-        return self._armada_sweep_target(turn)
+        return self._armada_sweep_target(turn, wing=wing)
 
     @staticmethod
     def _peer_armada_units(peer: AlliancePeer) -> tuple[AllianceUnitSnapshot, ...]:
@@ -6176,26 +6204,62 @@ class CoreFarmer:
                 else core.position
             )
 
+        alliance_units = self._alliance_armada_snapshots(turn, armada_units)
+
+        # Split the armada into wings so the sweep covers more than one frontier
+        # leg at a time; coverage is bounded by how far a single fleet can walk.
+        # Wings only exist while the armada is actually sweeping empty ground —
+        # the moment there is something to fight the fleet re-forms as one, so
+        # splitting never costs concentration in a battle.
+        sweeping = (
+            strategic_target is None
+            and self.isolated_core_target_id is None
+            and self.stationary_unit_target_id is None
+            and not self._hostile_enemies(turn)
+        )
+        ordered = sorted(
+            alliance_units,
+            key=lambda snapshot: (
+                snapshot.unit_type.value,
+                snapshot.unit_id.bytes,
+            ),
+        )
+        wing_of = {
+            snapshot.unit_id: slot % ARMADA_SWEEP_WINGS
+            for slot, snapshot in enumerate(ordered)
+        }
+        wing = wing_of.get(unit.id, 0) if sweeping else 0
+        wing_units = (
+            [
+                snapshot
+                for snapshot in alliance_units
+                if wing_of.get(snapshot.unit_id, 0) == wing
+            ]
+            or alliance_units
+        ) if sweeping else alliance_units
+
         target = (
             strategic_target
             if strategic_target is not None
-            else self._armada_strategic_target(turn)
+            else self._armada_strategic_target(turn, wing=wing)
         )
-        self.armada_target_position = target
+        if wing == 0:
+            self.armada_target_position = target
 
-        alliance_units = self._alliance_armada_snapshots(turn, armada_units)
         centroid = (
-            self._armada_centroid(alliance_units)
-            if alliance_units
+            self._armada_centroid(wing_units)
+            if wing_units
             else core.position
         )
 
-        self.armada_anchor_position = centroid
-        self.armada_mode = self._armada_formation_mode(
+        if wing == 0:
+            self.armada_anchor_position = centroid
+        formation_mode = self._armada_formation_mode(
             turn,
             centroid,
             target,
         )
+        self.armada_mode = formation_mode
 
         # A stalled fleet abandons formation and drives at the target.  Contact
         # and siege postures keep their formation: breaking those apart would
@@ -6203,7 +6267,7 @@ class CoreFarmer:
         # to stop closing anyway.
         if (
             turn.tick < self.armada_breakout_until_tick
-            and self.armada_mode not in {"CONTACT", "SIEGE"}
+            and formation_mode not in {"CONTACT", "SIEGE"}
         ):
             self.armada_mode = "BREAKOUT"
             return target if _is_signed_int64_position(target) else unit.position
@@ -6213,7 +6277,7 @@ class CoreFarmer:
         px, py = -dy, dx
         typed_units = [
             snapshot
-            for snapshot in alliance_units
+            for snapshot in wing_units
             if snapshot.unit_type is getattr(unit, "unit_type", None)
         ]
         global_index = next(

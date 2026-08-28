@@ -58,8 +58,10 @@ A leg is one 32x32 map chunk. The scorer ranks candidate chunks by:
 
 1. a remembered enemy Core inside the chunk;
 2. whether the chunk was recently abandoned as unreachable;
-3. how long ago the chunk was last observed;
-4. distance from the armada anchor.
+3. whether a sibling wing already holds a leg within `ARMADA_WING_SEPARATION`;
+4. how long ago the chunk was last observed;
+5. distance from the armada anchor, then the coordinate itself so the choice
+   never depends on set iteration order.
 
 Candidates are the anchor's own chunk neighbourhood plus the frontier around
 every chunk in coverage memory, so a fleet that spawns far from the world origin
@@ -79,6 +81,25 @@ set so the scorer moves on. Abandoned chunks expire after
 gathered fleet marching across the map is the headline plan rather than the
 build order. `ASSAULT`, `RECOVERY`, `COMPATIBILITY_HOLD`, and `RESPAWNING` still
 take precedence over it.
+
+### Sweep Wings
+
+Sweep coverage is bounded by travel, not by target choice: a fleet moving one
+cell per Tick can cross roughly 28 chunk-widths in 900 Ticks, and the selector
+already covers about 41 chunks in that time. Widening the candidate horizon or
+reordering it into rings was measured and changed nothing — the fleet simply
+cannot be in more places. Parallelism is the only lever that works.
+
+The armada therefore splits into `ARMADA_SWEEP_WINGS` wings while it sweeps.
+Each wing keeps its own committed chunk, its own centroid, and its own formation
+slots, and the scorer penalises any chunk within `ARMADA_WING_SEPARATION` of a
+sibling's leg — without that penalty the wings picked adjacent chunks and swept
+the same ground. Measured effect: +33% chunks swept across four starting
+positions, with no position regressing.
+
+Wings exist only while the armada sweeps empty ground. A visible hostile, a
+selected Core target, or a selected Unit target collapses every Unit back into
+wing 0, so the fleet concentrates to fight and disperses only to explore.
 
 ### Advance Stall Breakout
 

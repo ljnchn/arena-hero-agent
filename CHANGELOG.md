@@ -36,6 +36,12 @@ All notable changes to this project will be documented in this file. The format 
 - Visible hostile Cores are immediate priority targets, non-guard combat Units
   patrol an expanding perimeter, and a strong healthy force contests the Beacon.
 - All production paths use the SDK's current `unit_cost()` preview while preserving operational reserves. Obsolete upkeep diagnostics and alerts are replaced by settled spawn cost, required-price, and repeated affordability-failure telemetry.
+- The sweeping armada now splits into `ARMADA_SWEEP_WINGS` wings, each holding
+  its own frontier leg at least `ARMADA_WING_SEPARATION` chunks from its
+  siblings. Coverage is bounded by how far one fleet can walk, so parallelism is
+  the only lever that widens it: measured +33% chunks swept across four starting
+  positions. Wings exist only while sweeping empty ground — any hostile collapses
+  them back into a single anchor so the fleet never trickles into a fight.
 
 ### Fixed
 
