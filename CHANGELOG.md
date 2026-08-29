@@ -31,8 +31,8 @@ All notable changes to this project will be documented in this file. The format 
 - Docker Compose now uses the same graceful `SIGINT` shutdown contract as systemd.
 - Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.
 - Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
-- The default mature fleet is now `18 Workers + 14 Vanguards + 16 Rangers = 48`,
-  built through `6/2/2`, `12/6/8`, and `18/14/16` stages for 240 Core capacity.
+- The default mature fleet is now `18 Workers + 15 Vanguards + 17 Rangers = 50`,
+  built through `8/1/1`, `12/3/4`, `18/6/8`, and `18/15/17` stages for 250 Core capacity.
 - Visible hostile Cores are immediate priority targets, non-guard combat Units
   patrol an expanding perimeter, and a strong healthy force contests the Beacon.
 - All production paths use the SDK's current `unit_cost()` preview while preserving operational reserves. Obsolete upkeep diagnostics and alerts are replaced by settled spawn cost, required-price, and repeated affordability-failure telemetry.

@@ -12,7 +12,7 @@ it does not call a language model or rewrite itself while the game is live.
 4. A hostile position from an old Turn is memory, not current truth.
 5. Movement and attack are mutually exclusive Unit actions. An enemy cannot move
    and attack in the same Tick.
-6. Normal production stops at 48 Units: 18 Workers, 14 Vanguards, and 16 Rangers.
+6. Normal production stops at 50 Units: 18 Workers, 15 Vanguards, and 17 Rangers.
    Dynamic-price expansion is staged and never exceeds this tested cap.
 7. A visible hostile Core remains the primary mission target. Local pressure
    changes guard and movement assignments, but does not erase the target unless

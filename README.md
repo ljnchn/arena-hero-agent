@@ -14,15 +14,16 @@ Community acknowledgement: this project recognizes and supports the [LINUX DO co
 
 ## Strategy
 
-The default force grows through three production stages:
+The default force grows through four production stages:
 
 | Stage | Workers | Vanguards | Rangers | Population |
 | --- | ---: | ---: | ---: | ---: |
-| Establish | 6 | 2 | 2 | 10 |
-| Mobilize | 12 | 6 | 8 | 26 |
-| Overwhelm | 18 | 14 | 16 | 48 |
+| Establish | 8 | 1 | 1 | 10 |
+| Mobilize | 12 | 3 | 4 | 19 |
+| Expand | 18 | 6 | 8 | 32 |
+| Overwhelm | 18 | 15 | 17 | 50 |
 
-At 48 living Units, the Core capacity is 240 resources under `max(10, population * 5)`.
+At 50 living Units, the Core capacity is 250 resources under `max(10, population * 5)`.
 
 - Production continues while assaults are active and keeps a small Core repair reserve. Emergency defenders may spend that reserve.
 - Visible hostile Cores are the primary offensive target. Escorts and remote interception do not automatically cancel the raid.

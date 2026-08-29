@@ -31,9 +31,9 @@ The Agent reads credentials in this order:
 | `--alliance-roster-refresh-seconds` | `15` | Minimum interval between roster requests; the last successful roster remains cached. |
 | `--alliance-roster-timeout-seconds` | `5` | Timeout for one roster request. |
 
-The default unattended force is `18 Workers + 14 Vanguards + 16 Rangers = 48`.
-Core capacity therefore reaches 240 resources. Production is staged at
-`6/2/2`, `12/6/8`, and `18/14/16`; the controller previews each dynamic unit
+The default unattended force is `18 Workers + 15 Vanguards + 17 Rangers = 50`.
+Core capacity therefore reaches 250 resources. Production is staged at
+`8/1/1`, `12/3/4`, `18/6/8`, and `18/15/17`; the controller previews each dynamic unit
 price with the official SDK and retains a ten-resource Core reserve except for
 emergency defense.
 
