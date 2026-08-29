@@ -57,7 +57,7 @@ FORCE_STAGES = (
     (8, 1, 1),
     (12, 3, 4),
     (18, 6, 8),
-    (18, 14, 16),
+    (18, 15, 17),
 )
 DEFAULT_WORKER_TARGET = FORCE_STAGES[-1][0]
 DEFAULT_BEACON_POLICY = "pursue"
