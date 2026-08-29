@@ -5983,7 +5983,9 @@ class CoreFarmerTests(unittest.TestCase):
             ((12, 1, 1), UnitType.RANGER),
             ((12, 3, 4), UnitType.WORKER),
             ((18, 6, 8), UnitType.VANGUARD),
-            ((18, 14, 16), None),
+            ((18, 14, 16), UnitType.VANGUARD),
+            ((18, 15, 16), UnitType.RANGER),
+            ((18, 15, 17), None),
         )
         for counts, expected in cases:
             with self.subTest(counts=counts):
