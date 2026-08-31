@@ -63,6 +63,7 @@ DEFAULT_WORKER_TARGET = FORCE_STAGES[-1][0]
 DEFAULT_BEACON_POLICY = "pursue"
 BASE_WORKER_TARGET = FORCE_STAGES[0][0]
 CORE_RESOURCE_RESERVE = 10
+OVERFLOW_EXPANSION_RESERVE = 50
 LATE_EXPANSION_RESERVE = 10
 EARLY_DEFENSE_WORKER_GOAL = FORCE_STAGES[0][0]
 EARLY_DEFENSE_RESERVE = 10
@@ -8520,7 +8521,12 @@ class CoreFarmer:
             )
             else CORE_RESOURCE_RESERVE
         )
-        required_resources = reserve + unit_cost(next_unit, population)
+        required_reserve = (
+            OVERFLOW_EXPANSION_RESERVE
+            if overflow_expansion and not emergency_spawn
+            else reserve
+        )
+        required_resources = required_reserve + unit_cost(next_unit, population)
         if overflow_expansion:
             return next_unit if turn.resources >= required_resources else None
         threshold = min(turn.resource_capacity, required_resources)

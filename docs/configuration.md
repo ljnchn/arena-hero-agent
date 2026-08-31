@@ -46,7 +46,7 @@ emergency defense.
 Reaching the staged population is not a permanent production stop. When Core
 resources reach capacity, the controller first repairs any active force-stage deficit
 and then continues balanced Vanguard/Ranger growth, subject to the live SDK
-price and the normal ten-resource Core reserve.
+price and a separate 50-resource strategic reserve.
 
 The Core does not migrate for Beacon geometry or routine expansion. Workers
 clear the production cell. Core migration remains available to the survival

@@ -6066,7 +6066,7 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "SPAWN", "unit_type": "RANGER"},
         )
 
-    def test_full_core_overflow_growth_keeps_dynamic_price_reserve(self) -> None:
+    def test_full_core_overflow_growth_keeps_fifty_resource_reserve(self) -> None:
         units = self._workers(18)
         units.extend(
             unit(
@@ -6084,17 +6084,21 @@ class CoreFarmerTests(unittest.TestCase):
             )
             for index in range(17)
         )
-        with patch("arena_farmer.unit_cost", return_value=241):
-            tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
-            tactic.choose_actions(make_turn(tick=100, resources=250, units=units))
-            turn = make_turn(tick=101, resources=250, units=units)
-            tactic.choose_actions(turn)
-            queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        for unit_price, expected_spawn in ((200, True), (201, False)):
+            with self.subTest(unit_price=unit_price):
+                with patch("arena_farmer.unit_cost", return_value=unit_price):
+                    tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+                    tactic.choose_actions(
+                        make_turn(tick=100, resources=250, units=units)
+                    )
+                    turn = make_turn(tick=101, resources=250, units=units)
+                    tactic.choose_actions(turn)
+                    queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertNotEqual(
-            queued.get("core_action", {}).get("type"),
-            "SPAWN",
-        )
+                self.assertEqual(
+                    queued.get("core_action", {}).get("type") == "SPAWN",
+                    expected_spawn,
+                )
 
     def test_emergency_defenders_use_dynamic_price_preview(self) -> None:
         vanguard_turn = dict(

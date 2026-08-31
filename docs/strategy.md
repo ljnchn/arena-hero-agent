@@ -23,7 +23,7 @@ Normal production first completes the `18 Workers + 15 Vanguards + 17 Rangers`
 staged force. After that point, a Core below resource capacity waits; a full Core
 uses otherwise wasted resources to repair any active force-stage deficit and then
 continues balanced Vanguard/Ranger growth. Overflow growth still previews the
-dynamic price and preserves the ten-resource repair reserve.
+dynamic price and preserves a separate 50-resource strategic reserve.
 
 ## Core And Economy
 
