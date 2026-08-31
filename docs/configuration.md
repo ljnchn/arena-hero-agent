@@ -31,6 +31,12 @@ The Agent reads credentials in this order:
 | `--alliance-roster-refresh-seconds` | `15` | Minimum interval between roster requests; the last successful roster remains cached. |
 | `--alliance-roster-timeout-seconds` | `5` | Timeout for one roster request. |
 
+`start_agent.sh` enables a 90-second stale-Turn deadline by default. On expiry,
+the watchdog first closes the event stream; if the main planning loop does not
+unwind within five seconds, it forces transient exit code 75 so the launcher or
+process supervisor can restart a CPU-stuck Agent. Direct CLI invocations retain
+the opt-in default of `0` for interactive development.
+
 The default unattended force is `18 Workers + 15 Vanguards + 17 Rangers = 50`.
 Core capacity therefore reaches 250 resources. Production is staged at
 `8/1/1`, `12/3/4`, `18/6/8`, and `18/15/17`; the controller previews each dynamic unit

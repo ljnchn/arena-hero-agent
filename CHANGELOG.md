@@ -45,6 +45,9 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- The accepted-Turn watchdog now forces a transient process restart when closing
+  the event stream cannot interrupt a CPU-stuck planning loop. The local launcher
+  enables the same 90-second deadline used by unattended systemd deployments.
 - An unreachable alliance roster no longer pacifies the Agent. `_hostile_enemies()`
   returned an empty tuple whenever the shared roster had never loaded, so with the
   endpoint answering `403` the fleet treated the entire map as friendly: no assault

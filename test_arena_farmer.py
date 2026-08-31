@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from collections import deque
 from contextlib import redirect_stderr
@@ -32,6 +33,7 @@ from arena_farmer import (
     ARMADA_SWEEP_WINGS,
     ARMADA_WING_SEPARATION,
     ARMADA_ADVANCE_STALL_TICKS,
+    TRANSIENT_EXIT_CODE,
     CoreRaidTarget,
     CoreFarmer,
     EnemyCoreSighting,
@@ -54,6 +56,7 @@ from arena_farmer import (
     _reconcile_resource_turn,
     _should_log_turn,
     _systemd_status,
+    _AcceptedTurnWatchdog,
     build_parser,
     load_api_key,
     play,
@@ -7444,6 +7447,28 @@ class EventLoopTests(unittest.TestCase):
                     beacon_policy="retreat",
                     stale_turn_timeout_seconds=timeout,
                 )
+
+    def test_stale_turn_watchdog_forces_exit_when_main_loop_is_stuck(self) -> None:
+        forced: list[int] = []
+        closed = threading.Event()
+
+        class StuckGame:
+            def close(self) -> None:
+                closed.set()
+
+        watchdog = _AcceptedTurnWatchdog(
+            StuckGame(),
+            0.01,
+            force_exit=forced.append,
+            force_exit_grace_seconds=0.01,
+        )
+        with watchdog:
+            deadline = time.monotonic() + 1
+            while not forced and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertTrue(closed.is_set())
+        self.assertEqual(forced, [TRANSIENT_EXIT_CODE])
 
     def test_systemd_notify_is_optional_outside_service(self) -> None:
         previous = os.environ.pop("NOTIFY_SOCKET", None)

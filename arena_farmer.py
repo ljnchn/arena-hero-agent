@@ -183,6 +183,7 @@ PROTOCOL_EXIT_CODE = 12
 API_EXIT_CODE = 13
 AGENT_EXIT_CODE = 14
 DEFAULT_STALE_TURN_TIMEOUT_SECONDS = 0.0
+WATCHDOG_FORCE_EXIT_GRACE_SECONDS = 5.0
 DEFAULT_ALLIANCE_STALE_SECONDS = 60.0
 DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS = 1.0
 ALLIANCE_ROSTER_USER_AGENT = "arena-hero-agent/1.0"
@@ -9165,9 +9166,18 @@ def _should_log_turn(turn: Turn) -> bool:
 
 
 class _AcceptedTurnWatchdog:
-    def __init__(self, game: ArenaHeroClient, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        game: ArenaHeroClient,
+        timeout_seconds: float,
+        *,
+        force_exit: Callable[[int], object] = os._exit,
+        force_exit_grace_seconds: float = WATCHDOG_FORCE_EXIT_GRACE_SECONDS,
+    ) -> None:
         self.game = game
         self.timeout_seconds = timeout_seconds
+        self.force_exit = force_exit
+        self.force_exit_grace_seconds = force_exit_grace_seconds
         self.stop_event = threading.Event()
         self.timed_out = threading.Event()
         self.lock = threading.Lock()
@@ -9208,6 +9218,15 @@ class _AcceptedTurnWatchdog:
                 flush=True,
             )
             self.game.close()
+            if self.stop_event.wait(self.force_exit_grace_seconds):
+                return
+            print(
+                "WARNING Agent main loop did not stop after closing the event "
+                "stream; forcing a transient restart",
+                file=sys.stderr,
+                flush=True,
+            )
+            self.force_exit(TRANSIENT_EXIT_CODE)
             return
 
 

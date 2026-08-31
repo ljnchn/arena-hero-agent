@@ -15,6 +15,7 @@ BASE_URL=""
 DASHBOARD_PORT=8765
 NO_DASHBOARD=false
 NO_COMPATIBILITY_MARKER=false
+STALE_TURN_TIMEOUT_SECONDS=90
 
 # 路径解析函数
 resolve_path() {
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --history-db) HISTORY_DB="$2"; shift 2 ;;
     --base-url) BASE_URL="$2"; shift 2 ;;
     --dashboard-port) DASHBOARD_PORT="$2"; shift 2 ;;
+    --stale-turn-timeout-seconds) STALE_TURN_TIMEOUT_SECONDS="$2"; shift 2 ;;
     --no-dashboard) NO_DASHBOARD=true; shift ;;
     --no-compatibility-marker) NO_COMPATIBILITY_MARKER=true; shift ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -124,6 +126,7 @@ AGENT_ARGS=(
     "--worker-target" "$WORKER_TARGET"
     "--beacon-policy" "$BEACON_POLICY"
     "--history-db" "$HISTORY_PATH"
+    "--stale-turn-timeout-seconds" "$STALE_TURN_TIMEOUT_SECONDS"
 )
 if [ -n "$BASE_URL" ]; then
     AGENT_ARGS+=("--base-url" "$BASE_URL")
