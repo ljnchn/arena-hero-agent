@@ -13,11 +13,17 @@ exploration, outward patrols, enemy removal, and durable map presence.
 | Mobilize | 12 | 6 | 8 | 26 | Build enough damage to attack nearby Cores continuously. |
 | Overwhelm | 18 | 14 | 16 | 48 | Maintain two Core guards and send the rest outward. |
 
-The Core capacity at the final population is `max(10, 48 * 5) = 240`.
+The Core capacity at the final staged population is `max(10, 50 * 5) = 250`.
 There is no upkeep in gameplay v0.14. Every spawn branch previews the current
 price with the official SDK's `unit_cost()`; the settled spawn event remains
 authoritative. Ordinary production keeps a ten-resource Core reserve, while an
 immediate threat can spend it on emergency combat units.
+
+Normal production first completes the `18 Workers + 15 Vanguards + 17 Rangers`
+staged force. After that point, a Core below resource capacity waits; a full Core
+uses otherwise wasted resources to repair any active force-stage deficit and then
+continues balanced Vanguard/Ranger growth. Overflow growth still previews the
+dynamic price and preserves the ten-resource repair reserve.
 
 ## Core And Economy
 

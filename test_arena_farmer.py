@@ -5997,6 +5997,105 @@ class CoreFarmerTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_full_mature_core_continues_balanced_combat_growth(self) -> None:
+        units = self._workers(18)
+        units.extend(
+            unit(
+                f"32000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (20 + index, 0),
+            )
+            for index in range(15)
+        )
+        units.extend(
+            unit(
+                f"33000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (20 + index, 2),
+            )
+            for index in range(17)
+        )
+
+        def overflow_plan(resources: int) -> dict[str, object]:
+            tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+            tactic.choose_actions(make_turn(tick=100, resources=resources, units=units))
+            turn = make_turn(tick=101, resources=resources, units=units)
+            tactic.choose_actions(turn)
+            return turn.plan.model_dump(mode="json", exclude_none=True)
+
+        with patch("arena_farmer.unit_cost", return_value=30):
+            accumulating = overflow_plan(249)
+            expanding = overflow_plan(250)
+
+        self.assertNotEqual(
+            accumulating.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(
+            expanding["core_action"],
+            {"type": "SPAWN", "unit_type": "VANGUARD"},
+        )
+
+    def test_full_core_repairs_force_deficit_before_overflow_balance(self) -> None:
+        units = self._workers(16)
+        units.extend(
+            unit(
+                f"34000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (20 + index, 0),
+            )
+            for index in range(22)
+        )
+        units.extend(
+            unit(
+                f"35000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (20 + index, 2),
+            )
+            for index in range(12)
+        )
+        with patch("arena_farmer.unit_cost", return_value=30):
+            tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+            tactic.choose_actions(make_turn(tick=100, resources=250, units=units))
+            turn = make_turn(tick=101, resources=250, units=units)
+            tactic.choose_actions(turn)
+            queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(
+            queued["core_action"],
+            {"type": "SPAWN", "unit_type": "RANGER"},
+        )
+
+    def test_full_core_overflow_growth_keeps_dynamic_price_reserve(self) -> None:
+        units = self._workers(18)
+        units.extend(
+            unit(
+                f"36000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (20 + index, 0),
+            )
+            for index in range(15)
+        )
+        units.extend(
+            unit(
+                f"37000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (20 + index, 2),
+            )
+            for index in range(17)
+        )
+        with patch("arena_farmer.unit_cost", return_value=241):
+            tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+            tactic.choose_actions(make_turn(tick=100, resources=250, units=units))
+            turn = make_turn(tick=101, resources=250, units=units)
+            tactic.choose_actions(turn)
+            queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertNotEqual(
+            queued.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+
     def test_emergency_defenders_use_dynamic_price_preview(self) -> None:
         vanguard_turn = dict(
             units=self._workers(6),

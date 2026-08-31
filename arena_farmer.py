@@ -8411,7 +8411,11 @@ class CoreFarmer:
             + DEFENSE_VANGUARD_TARGET
             + DEFENSE_RANGER_TARGET
         )
-        if population >= target_population:
+        overflow_expansion = (
+            population >= target_population
+            and turn.resources >= turn.resource_capacity
+        )
+        if population >= target_population and not overflow_expansion:
             return None
 
         next_unit = self.worker_conversion_unit_type or _next_force_unit_type(
@@ -8421,7 +8425,17 @@ class CoreFarmer:
             len(turn.rangers),
         )
         if next_unit is None:
-            return None
+            if not overflow_expansion:
+                return None
+            # Once the staged force is complete, turn otherwise wasted full-Core
+            # resources into combat strength while preserving the mature fleet's
+            # Vanguard:Ranger balance. Workers remain bounded by worker_target.
+            next_unit = (
+                UnitType.VANGUARD
+                if len(turn.vanguards) * DEFENSE_RANGER_TARGET
+                <= len(turn.rangers) * DEFENSE_VANGUARD_TARGET
+                else UnitType.RANGER
+            )
 
         emergency_spawn = self._core_defense_active(nearest_threat)
         if emergency_spawn:
@@ -8506,10 +8520,10 @@ class CoreFarmer:
             )
             else CORE_RESOURCE_RESERVE
         )
-        threshold = min(
-            turn.resource_capacity,
-            reserve + unit_cost(next_unit, population),
-        )
+        required_resources = reserve + unit_cost(next_unit, population)
+        if overflow_expansion:
+            return next_unit if turn.resources >= required_resources else None
+        threshold = min(turn.resource_capacity, required_resources)
         return next_unit if turn.resources >= threshold else None
 
     def _spawn_reservation(

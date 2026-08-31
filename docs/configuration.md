@@ -43,6 +43,11 @@ Core capacity therefore reaches 250 resources. Production is staged at
 price with the official SDK and retains a ten-resource Core reserve except for
 emergency defense.
 
+Reaching the staged population is not a permanent production stop. When Core
+resources reach capacity, the controller first repairs any active force-stage deficit
+and then continues balanced Vanguard/Ranger growth, subject to the live SDK
+price and the normal ten-resource Core reserve.
+
 The Core does not migrate for Beacon geometry or routine expansion. Workers
 clear the production cell. Core migration remains available to the survival
 controller when a threat is close enough to justify the slower four-Tick move.

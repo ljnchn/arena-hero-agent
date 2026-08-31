@@ -25,6 +25,9 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- A full mature Core now spends otherwise wasted capped resources on continued
+  balanced Vanguard/Ranger growth, after repairing active force-stage deficits and
+  checking the live dynamic price plus the ten-resource repair reserve.
 - The Docker base image is pinned to an immutable multi-architecture digest.
 - GitHub Actions are pinned to full commit SHAs while retaining their reviewed major-version annotations.
 - systemd upgrades now preflight host requirements, restart the Agent after compatibility validation, and support explicit supervisor, AI, and optimizer disable paths.
