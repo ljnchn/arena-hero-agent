@@ -5760,7 +5760,10 @@ class CoreFarmer:
     ) -> tuple[dict[str, object], ...]:
         expedition_id = int(expedition["id"])
         accounts = self._alliance_combat_accounts(turn)
-        quota = self._alliance_perimeter_quota(accounts)
+        configured_minimum = int(expedition.get("vanguard_count", 0)) + int(
+            expedition.get("ranger_count", 0)
+        )
+        quota = max(configured_minimum, self._alliance_perimeter_quota(accounts))
         excluded = (
             claimed_ids
             | guards

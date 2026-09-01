@@ -63,6 +63,11 @@ the geometric center of
 all fresh allied Cores. If either Core reports an attack, both sectors contract
 to a four-cell ring around the threatened Core.
 
+The stored Vanguard and Ranger counts on a perimeter expedition define that
+account's minimum patrol size, not a fixed composition. This lets a completed
+strike group be folded back into the rotating perimeter while its members are
+rebalanced against the current joint force ratio.
+
 ## Armada Sweep
 
 The sweep is the default behaviour of a gathered armada, not a separate mode an

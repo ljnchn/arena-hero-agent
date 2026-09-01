@@ -72,7 +72,8 @@ and fixed composition while active: ordinary target expeditions retain priority,
 then the Agents jointly size a rotating outer defense at 25% of combined combat
 population. Each account contributes proportionally, fixed Core guards remain
 inside, and either account's attack broadcast contracts the shared perimeter for
-mutual defense.
+mutual defense. The configured Vanguard-plus-Ranger count is a local minimum
+patrol size; the live composition remains dynamic.
 
 For fail-safe operation, set `--alliance-expected-members` to the configured
 account count. An Agent chooses WAIT until every member has published identity

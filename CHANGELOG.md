@@ -30,6 +30,8 @@ All notable changes to this project will be documented in this file. The format 
   composition against the combined Vanguard/Ranger ratio, patrols offset
   sectors around both Cores, and contracts around either Core when attacked
   without taking fixed guards or named strike-expedition members.
+- Perimeter expedition counts now set a minimum patrol size while composition
+  remains dynamic, allowing completed strike groups to return to the shared ring.
 - A full mature Core now spends otherwise wasted capped resources on continued
   balanced Vanguard/Ranger growth, after repairing active force-stage deficits and
   checking the live dynamic price plus a 50-resource strategic reserve.

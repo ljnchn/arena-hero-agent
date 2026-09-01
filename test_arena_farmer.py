@@ -1784,8 +1784,8 @@ class CoreFarmerTests(unittest.TestCase):
                         "id": 2,
                         "mode": "ALLIANCE_PERIMETER",
                         "enabled": True,
-                        "ranger_count": 1,
-                        "vanguard_count": 1,
+                        "ranger_count": 3,
+                        "vanguard_count": 3,
                         "target_x": 0,
                         "target_y": 0,
                     },
@@ -1798,14 +1798,14 @@ class CoreFarmerTests(unittest.TestCase):
         unit_types = {unit.id: unit.unit_type for unit in turn.units}
         perimeter_orders = [order for order in orders if int(order["id"]) < -1_000_000]
         self.assertEqual(len(strike), 2)
-        self.assertEqual(len(perimeter), 4)
+        self.assertEqual(len(perimeter), 6)
         self.assertEqual(
             sum(unit_types[unit_id] is UnitType.VANGUARD for unit_id in perimeter),
             2,
         )
         self.assertEqual(
             sum(unit_types[unit_id] is UnitType.RANGER for unit_id in perimeter),
-            2,
+            4,
         )
         self.assertTrue(strike.isdisjoint(perimeter))
         self.assertTrue(guards.isdisjoint(perimeter))
