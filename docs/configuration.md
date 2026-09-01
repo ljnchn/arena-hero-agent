@@ -66,6 +66,14 @@ the stable account ID. Healthy follower Cores move toward that leader until
 they are within 12 cells. Survival, healing, cargo delivery, and compatibility
 hold take priority over alliance movement.
 
+Expeditions support `TARGET` (the default fixed destination) and
+`ALLIANCE_PERIMETER` modes. The perimeter mode ignores the stored destination
+and fixed composition while active: ordinary target expeditions retain priority,
+then the Agents jointly size a rotating outer defense at 25% of combined combat
+population. Each account contributes proportionally, fixed Core guards remain
+inside, and either account's attack broadcast contracts the shared perimeter for
+mutual defense.
+
 For fail-safe operation, set `--alliance-expected-members` to the configured
 account count. An Agent chooses WAIT until every member has published identity
 for the same Turn. Stale or malformed state is ignored, preventing an unknown

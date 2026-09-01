@@ -803,6 +803,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         db_path,
                         expedition_id=payload.get("id"),
                         name=payload.get("name", ""),
+                        mode=payload.get("mode", "TARGET"),
                         ranger_count=payload.get("ranger_count"),
                         vanguard_count=payload.get("vanguard_count"),
                         target=(payload.get("target_x"), payload.get("target_y")),

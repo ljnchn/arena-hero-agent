@@ -49,9 +49,19 @@ confirmed, or escort-free before becoming a mission target. A remote escort can
 change local threat posture, but it does not erase the Core target. Rangers use
 legal cell fire; Vanguards sweep adjacent targets or move toward the target.
 
-One Vanguard and one Ranger remain as Core guards. Other combat units join the
-strike group. When there is no visible target, non-guard units follow
+Two Vanguards and two Rangers remain as mature Core guards. Other combat units
+join the strike group. When there is no visible target, non-guard units follow
 deterministic outward patrol sectors whose radius grows with elapsed Ticks.
+
+An expedition configured in `ALLIANCE_PERIMETER` mode turns otherwise unclaimed
+combat units into a shared outer defense. Named attacks and fixed Core guards
+are allocated first. The two accounts then target 25% of their combined combat
+population for the perimeter from remaining units, divide that duty by each
+account's share of the joint force, and match the joint Vanguard/Ranger ratio
+as closely as locally available units allow. Patrol sectors are offset around
+the geometric center of
+all fresh allied Cores. If either Core reports an attack, both sectors contract
+to a four-cell ring around the threatened Core.
 
 ## Armada Sweep
 

@@ -658,7 +658,9 @@ function drawRoutes(overview) {
   (state.orders || []).filter((item) => item.status === "PENDING").forEach((order) => {
     order.unit_ids.forEach((id) => routes.push([id, [order.target_x, order.target_y]]));
   });
-  (state.controlConfig.expeditions || []).filter((item) => item.enabled).forEach((expedition) => {
+  (state.controlConfig.expeditions || []).filter(
+    (item) => item.enabled && item.mode !== "ALLIANCE_PERIMETER"
+  ).forEach((expedition) => {
     const memberIds = overview.strategy.expedition_members?.[String(expedition.id)] || [];
     memberIds.forEach((id) => routes.push([id, [expedition.target_x, expedition.target_y]]));
   });
@@ -1139,9 +1141,15 @@ function renderExpeditions() {
     } else {
       item.className = "order-item";
       const summary = document.createElement("span");
-      summary.append(`${expedition.enabled ? "启用" : "暂停"} · ${expedition.name} · ${expedition.ranger_count}R ${expedition.vanguard_count}V → (`);
-      summary.append(coordLink(expedition.target_x, expedition.target_y, `${expedition.target_x},${expedition.target_y}`));
-      summary.append(")");
+      const perimeter = expedition.mode === "ALLIANCE_PERIMETER";
+      summary.append(`${expedition.enabled ? "启用" : "暂停"} · ${expedition.name} · `);
+      if (perimeter) {
+        summary.append("按联合兵力动态巡逻");
+      } else {
+        summary.append(`${expedition.ranger_count}R ${expedition.vanguard_count}V → (`);
+        summary.append(coordLink(expedition.target_x, expedition.target_y, `${expedition.target_x},${expedition.target_y}`));
+        summary.append(")");
+      }
       const edit = document.createElement("button");
       edit.type = "button"; edit.dataset.editExpedition = expedition.id; edit.textContent = "编辑";
       const remove = document.createElement("button");
@@ -1808,6 +1816,7 @@ ui.expeditionForm.addEventListener("submit", async (event) => {
   const payload = {
     id: rawId ? Number(rawId) : null,
     name: document.querySelector("#expedition-name").value,
+    mode: document.querySelector("#expedition-mode").value,
     ranger_count: Number(document.querySelector("#expedition-ranger").value),
     vanguard_count: Number(document.querySelector("#expedition-vanguard").value),
     target_x: absPos[0],
@@ -1839,6 +1848,7 @@ ui.expeditionList.addEventListener("click", async (event) => {
     if (!expedition) return;
     document.querySelector("#expedition-id").value = expedition.id;
     document.querySelector("#expedition-name").value = expedition.name;
+    document.querySelector("#expedition-mode").value = expedition.mode || "TARGET";
     document.querySelector("#expedition-ranger").value = expedition.ranger_count;
     document.querySelector("#expedition-vanguard").value = expedition.vanguard_count;
     document.querySelector("#expedition-x").value = expedition.target_x;

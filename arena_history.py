@@ -22,6 +22,7 @@ Position = tuple[int, int]
 UNIT_ORDER_TYPES = {"CORE", "WORKER", "VANGUARD", "RANGER"}
 UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
 PRODUCTION_UNIT_TYPES = ("WORKER", "VANGUARD", "RANGER")
+EXPEDITION_MODES = {"TARGET", "ALLIANCE_PERIMETER"}
 DEFAULT_ALLIANCE_RALLY_RADIUS = 12
 MIN_ALLIANCE_RALLY_RADIUS = 1
 MAX_ALLIANCE_RALLY_RADIUS = 256
@@ -273,6 +274,7 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS expeditions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'TARGET',
             ranger_count INTEGER NOT NULL,
             vanguard_count INTEGER NOT NULL,
             target_x INTEGER NOT NULL,
@@ -281,6 +283,7 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
             updated_at REAL NOT NULL,
             CHECK (ranger_count BETWEEN 0 AND 32),
             CHECK (vanguard_count BETWEEN 0 AND 32),
+            CHECK (mode IN ('TARGET', 'ALLIANCE_PERIMETER')),
             CHECK (enabled IN (0, 1))
         );
         CREATE TABLE IF NOT EXISTS alliance_config (
@@ -295,6 +298,15 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    expedition_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(expeditions)")
+    }
+    if "mode" not in expedition_columns:
+        connection.execute(
+            "ALTER TABLE expeditions ADD COLUMN "
+            "mode TEXT NOT NULL DEFAULT 'TARGET'"
+        )
     alliance_columns = {
         str(row["name"])
         for row in connection.execute("PRAGMA table_info(alliance_config)")
@@ -899,7 +911,7 @@ def _read_control_config(
     expeditions = connection.execute(
         """
         SELECT id, name, ranger_count, vanguard_count, target_x, target_y,
-               enabled, updated_at
+               enabled, updated_at, mode
         FROM expeditions ORDER BY id
         """
     ).fetchall()
@@ -1026,10 +1038,14 @@ def save_expedition(
     vanguard_count: int,
     target: Position,
     enabled: bool,
+    mode: str = "TARGET",
 ) -> dict[str, object]:
     normalized_name = str(name).strip()
     if not normalized_name or len(normalized_name) > 40:
         raise ValueError("expedition name must contain 1-40 characters")
+    normalized_mode = str(mode).strip().upper()
+    if normalized_mode not in EXPEDITION_MODES:
+        raise ValueError("expedition mode must be TARGET or ALLIANCE_PERIMETER")
     counts = (ranger_count, vanguard_count)
     if any(isinstance(value, bool) or not isinstance(value, int) for value in counts):
         raise ValueError("expedition counts must be integers")
@@ -1055,11 +1071,18 @@ def save_expedition(
             cursor = connection.execute(
                 """
                 INSERT INTO expeditions
-                    (name, ranger_count, vanguard_count, target_x, target_y,
+                    (name, mode, ranger_count, vanguard_count, target_x, target_y,
                      enabled, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (*((normalized_name,) + counts + tuple(target)), int(enabled), updated_at),
+                (
+                    normalized_name,
+                    normalized_mode,
+                    *counts,
+                    *target,
+                    int(enabled),
+                    updated_at,
+                ),
             )
             expedition_id = int(cursor.lastrowid)
         else:
@@ -1067,10 +1090,18 @@ def save_expedition(
                 raise ValueError("expedition id must be positive")
             cursor = connection.execute(
                 """
-                UPDATE expeditions SET name=?, ranger_count=?, vanguard_count=?,
+                UPDATE expeditions SET name=?, mode=?, ranger_count=?, vanguard_count=?,
                     target_x=?, target_y=?, enabled=?, updated_at=? WHERE id=?
                 """,
-                (*((normalized_name,) + counts + tuple(target)), int(enabled), updated_at, expedition_id),
+                (
+                    normalized_name,
+                    normalized_mode,
+                    *counts,
+                    *target,
+                    int(enabled),
+                    updated_at,
+                    expedition_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("expedition was not found")
@@ -1078,6 +1109,7 @@ def save_expedition(
     return {
         "id": expedition_id,
         "name": normalized_name,
+        "mode": normalized_mode,
         "ranger_count": ranger_count,
         "vanguard_count": vanguard_count,
         "target_x": target[0],

@@ -26,6 +26,7 @@ from arena_hero import (
 
 from arena_farmer import (
     AllianceCoordinator,
+    AllianceDefenseRequest,
     AllianceEnemyCoreSighting,
     AllianceEnemyUnitSighting,
     AllianceRosterClient,
@@ -1703,6 +1704,183 @@ class CoreFarmerTests(unittest.TestCase):
 
         selected = {unit_id for order in orders for unit_id in order["unit_ids"]}
         self.assertEqual(selected, {VANGUARD_2, RANGER_2})
+
+    def test_alliance_perimeter_uses_joint_ratio_after_target_expeditions(self) -> None:
+        local_units = [
+            unit(
+                f"41000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (index + 1, 0),
+            )
+            for index in range(8)
+        ] + [
+            unit(
+                f"42000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (index + 1, 1),
+            )
+            for index in range(8)
+        ]
+        peer_units = [
+            unit(
+                f"43000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (20 + index, 0),
+            )
+            for index in range(2)
+        ] + [
+            unit(
+                f"44000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (20 + index, 1),
+            )
+            for index in range(8)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            ).publish(
+                make_turn(
+                    tick=100,
+                    core_identifier=ALLY_CORE_ID,
+                    owner_username="ally",
+                    core_position=(20, 0),
+                    units=peer_units,
+                )
+            )
+            tactic = CoreFarmer(
+                worker_target=1,
+                beacon_policy="hold",
+                alliance_coordinator=AllianceCoordinator(
+                    shared,
+                    alliance_id="duo",
+                    account_id="account-1",
+                    expected_members=2,
+                    barrier_timeout_seconds=0,
+                ),
+            )
+            turn = make_turn(tick=100, units=local_units)
+            tactic._refresh_alliance(turn)
+            guards = set().union(*_core_guard_ids(turn))
+
+            orders = tactic.expedition_orders(
+                turn,
+                [
+                    {
+                        "id": 1,
+                        "mode": "TARGET",
+                        "enabled": True,
+                        "ranger_count": 1,
+                        "vanguard_count": 1,
+                        "target_x": 40,
+                        "target_y": 0,
+                    },
+                    {
+                        "id": 2,
+                        "mode": "ALLIANCE_PERIMETER",
+                        "enabled": True,
+                        "ranger_count": 1,
+                        "vanguard_count": 1,
+                        "target_x": 0,
+                        "target_y": 0,
+                    },
+                ],
+                claimed_ids=set(),
+            )
+
+        strike = tactic.expedition_members[1]
+        perimeter = tactic.expedition_members[2]
+        unit_types = {unit.id: unit.unit_type for unit in turn.units}
+        perimeter_orders = [order for order in orders if int(order["id"]) < -1_000_000]
+        self.assertEqual(len(strike), 2)
+        self.assertEqual(len(perimeter), 4)
+        self.assertEqual(
+            sum(unit_types[unit_id] is UnitType.VANGUARD for unit_id in perimeter),
+            2,
+        )
+        self.assertEqual(
+            sum(unit_types[unit_id] is UnitType.RANGER for unit_id in perimeter),
+            2,
+        )
+        self.assertTrue(strike.isdisjoint(perimeter))
+        self.assertTrue(guards.isdisjoint(perimeter))
+        self.assertTrue(
+            all(
+                _distance((int(order["target_x"]), int(order["target_y"])), (10, 0))
+                == 15
+                for order in perimeter_orders
+            )
+        )
+
+    def test_alliance_perimeter_recall_centers_on_attacked_peer(self) -> None:
+        local_units = [
+            unit(
+                f"45000000-0000-4000-8000-{index:012x}",
+                "VANGUARD" if index < 6 else "RANGER",
+                (index + 1, 0),
+            )
+            for index in range(12)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            ).publish(
+                make_turn(
+                    tick=100,
+                    core_identifier=ALLY_CORE_ID,
+                    owner_username="ally",
+                    core_position=(20, 0),
+                    units=[],
+                ),
+                defense=AllianceDefenseRequest(under_attack=True),
+            )
+            tactic = CoreFarmer(
+                worker_target=1,
+                beacon_policy="hold",
+                alliance_coordinator=AllianceCoordinator(
+                    shared,
+                    alliance_id="duo",
+                    account_id="account-1",
+                    expected_members=2,
+                    barrier_timeout_seconds=0,
+                ),
+            )
+            turn = make_turn(tick=100, units=local_units)
+            tactic._refresh_alliance(turn)
+            orders = tactic.expedition_orders(
+                turn,
+                [
+                    {
+                        "id": 2,
+                        "mode": "ALLIANCE_PERIMETER",
+                        "enabled": True,
+                        "ranger_count": 1,
+                        "vanguard_count": 1,
+                        "target_x": 0,
+                        "target_y": 0,
+                    }
+                ],
+                claimed_ids=set(),
+            )
+
+        self.assertTrue(orders)
+        self.assertTrue(
+            all(
+                _distance((int(order["target_x"]), int(order["target_y"])), (20, 0))
+                == 4
+                for order in orders
+            )
+        )
 
     def test_expedition_preserves_existing_combat_action(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")

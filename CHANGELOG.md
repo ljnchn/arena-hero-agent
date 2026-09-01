@@ -25,6 +25,11 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- Added a two-account `ALLIANCE_PERIMETER` expedition mode that dynamically
+  targets 25% of joint combat strength from uncommitted units, balances its
+  composition against the combined Vanguard/Ranger ratio, patrols offset
+  sectors around both Cores, and contracts around either Core when attacked
+  without taking fixed guards or named strike-expedition members.
 - A full mature Core now spends otherwise wasted capped resources on continued
   balanced Vanguard/Ranger growth, after repairing active force-stage deficits and
   checking the live dynamic price plus a 50-resource strategic reserve.

@@ -96,6 +96,12 @@ CORE_RAID_RANGERS = 2
 CORE_RESERVE_VANGUARDS = 1
 CORE_RESERVE_RANGERS = 2
 CORE_RESERVE_RADIUS = 5
+ALLIANCE_PERIMETER_RATIO = 0.25
+ALLIANCE_PERIMETER_MIN_RADIUS = 8
+ALLIANCE_PERIMETER_CORE_BUFFER = 5
+ALLIANCE_PERIMETER_MAX_RADIUS = 24
+ALLIANCE_PERIMETER_RECALL_RADIUS = 4
+ALLIANCE_PERIMETER_ROTATION_TICKS = 4
 EARLY_ASSAULT_MIN_VANGUARDS = VANGUARD_CORE_GUARDS + 1
 EARLY_ASSAULT_MIN_RANGERS = RANGER_CORE_GUARDS + 1
 ASSAULT_MIN_VANGUARDS = (
@@ -1108,6 +1114,23 @@ def _load_alliance_roster_token(path: Path) -> str:
 
 def _distance(left: Position, right: Position) -> int:
     return abs(left[0] - right[0]) + abs(left[1] - right[1])
+
+
+def _diamond_perimeter(center: Position, radius: int) -> tuple[Position, ...]:
+    """Return a stable clockwise Manhattan ring without duplicate corners."""
+    if radius < 1:
+        return (center,)
+    x, y = center
+    cells: list[Position] = []
+    for step in range(radius):
+        cells.append((x + step, y - radius + step))
+    for step in range(radius):
+        cells.append((x + radius - step, y + step))
+    for step in range(radius):
+        cells.append((x - step, y + radius - step))
+    for step in range(radius):
+        cells.append((x - radius + step, y - step))
+    return tuple(cells)
 
 
 def _core_guard_ids(turn: Turn) -> tuple[set[UUID], set[UUID]]:
@@ -2456,6 +2479,7 @@ class CoreFarmer:
         self.alliance_defense_enabled = True
         self.alliance_defense_request: AllianceDefenseRequest | None = None
         self.alliance_defense_peer_id: str | None = None
+        self.alliance_defense_anchor: Position | None = None
         self.alliance_defense_updated_tick = 0
         self.alliance_defense_ids: set[UUID] = set()
         self.alliance_turn_tick: int | None = None
@@ -2526,6 +2550,9 @@ class CoreFarmer:
         self.worker_conversion_unit_type: UnitType | None = None
         self.effective_worker_target = worker_target
         self.expedition_members: dict[int, set[UUID]] = {}
+        self.alliance_perimeter_ids: set[UUID] = set()
+        self.alliance_perimeter_center: Position | None = None
+        self.alliance_perimeter_radius = 0
         self.revenge_usernames: set[str] = set()
         self.manual_core_order_active = False
         self.armada_target_position: Position | None = None
@@ -2930,6 +2957,7 @@ class CoreFarmer:
         self.alliance_defense_ids.clear()
         self.alliance_defense_request = None
         self.alliance_defense_peer_id = None
+        self.alliance_defense_anchor = None
 
     def _assign_alliance_defenders(
         self,
@@ -3019,6 +3047,7 @@ class CoreFarmer:
         self.alliance_defense_updated_tick = turn.tick
         anchor = peer.core_position
         assert anchor is not None
+        self.alliance_defense_anchor = anchor
         self._assign_alliance_defenders(turn, anchor, isolated_core_target)
 
     def _control_alliance_defender(
@@ -3029,9 +3058,13 @@ class CoreFarmer:
         ranged: bool,
     ) -> bool:
         request = self.alliance_defense_request
-        if request is None or defender.id not in self.alliance_defense_ids:
+        anchor = self.alliance_defense_anchor
+        if (
+            request is None
+            or anchor is None
+            or defender.id not in self.alliance_defense_ids
+        ):
             return False
-        anchor = request.core_position
         hold_radius = RANGER_GUARD_RADIUS if ranged else VANGUARD_GUARD_RADIUS
         engage_cells = [
             cell
@@ -3202,6 +3235,13 @@ class CoreFarmer:
             "advance_progress_tick": self.armada_advance_progress_tick,
             "breakout_until_tick": self.armada_breakout_until_tick,
             "manual_orders": list(self.manual_order_ids),
+            "alliance_perimeter_center": (
+                list(self.alliance_perimeter_center)
+                if self.alliance_perimeter_center is not None
+                else None
+            ),
+            "alliance_perimeter_radius": self.alliance_perimeter_radius,
+            "alliance_perimeter_units": len(self.alliance_perimeter_ids),
             "expedition_members": {
                 str(expedition_id): [
                     str(unit_id)
@@ -5524,6 +5564,9 @@ class CoreFarmer:
     ) -> tuple[dict[str, object], ...]:
         if turn.core is None:
             self.expedition_members.clear()
+            self.alliance_perimeter_ids.clear()
+            self.alliance_perimeter_center = None
+            self.alliance_perimeter_radius = 0
             return ()
         guard_vanguards, guard_rangers = _core_guard_ids(turn)
         guards = guard_vanguards | guard_rangers
@@ -5535,6 +5578,8 @@ class CoreFarmer:
         orders: list[dict[str, object]] = []
         for expedition in expeditions:
             if not expedition.get("enabled"):
+                continue
+            if str(expedition.get("mode", "TARGET")) == "ALLIANCE_PERIMETER":
                 continue
             expedition_id = int(expedition["id"])
             target = (int(expedition["target_x"]), int(expedition["target_y"]))
@@ -5589,6 +5634,216 @@ class CoreFarmer:
                         }
                     )
             self.expedition_members[expedition_id] = members
+        perimeter_expeditions = [
+            expedition
+            for expedition in expeditions
+            if expedition.get("enabled")
+            and str(expedition.get("mode", "TARGET")) == "ALLIANCE_PERIMETER"
+        ]
+        if perimeter_expeditions:
+            orders.extend(
+                self._alliance_perimeter_orders(
+                    turn,
+                    perimeter_expeditions[0],
+                    claimed_ids=claimed_ids,
+                    guards=guards,
+                    units_by_id=units_by_id,
+                )
+            )
+            for extra in perimeter_expeditions[1:]:
+                self.expedition_members[int(extra["id"])] = set()
+        else:
+            self.alliance_perimeter_ids.clear()
+            self.alliance_perimeter_center = None
+            self.alliance_perimeter_radius = 0
+        return tuple(orders)
+
+    def _alliance_combat_accounts(
+        self,
+        turn: Turn,
+    ) -> tuple[tuple[str, int, int], ...]:
+        coordinator = self.alliance_coordinator
+        local_id = coordinator.account_id if coordinator is not None else "local"
+        accounts = {
+            local_id: (len(turn.vanguards), len(turn.rangers)),
+        }
+        if coordinator is not None and coordinator.expected_members > 1:
+            for peer in self.alliance_peers:
+                if peer.account_id == local_id or peer.core_position is None:
+                    continue
+                accounts[peer.account_id] = (
+                    sum(unit.unit_type is UnitType.VANGUARD for unit in peer.units),
+                    sum(unit.unit_type is UnitType.RANGER for unit in peer.units),
+                )
+        return tuple(
+            (account_id, counts[0], counts[1])
+            for account_id, counts in sorted(accounts.items())
+        )
+
+    def _alliance_perimeter_quota(
+        self,
+        accounts: Sequence[tuple[str, int, int]],
+    ) -> int:
+        coordinator = self.alliance_coordinator
+        local_id = coordinator.account_id if coordinator is not None else "local"
+        joint_combat = sum(vanguards + rangers for _, vanguards, rangers in accounts)
+        if joint_combat <= 0:
+            return 0
+        target = max(1, math.ceil(joint_combat * ALLIANCE_PERIMETER_RATIO))
+        quotas = {
+            account_id: target * (vanguards + rangers) // joint_combat
+            for account_id, vanguards, rangers in accounts
+        }
+        assigned = sum(quotas.values())
+        remainders = sorted(
+            (
+                (
+                    -(target * (vanguards + rangers) % joint_combat),
+                    account_id,
+                )
+                for account_id, vanguards, rangers in accounts
+                if vanguards + rangers > 0
+            )
+        )
+        for _, account_id in remainders[: target - assigned]:
+            quotas[account_id] += 1
+        return quotas.get(local_id, 0)
+
+    def _alliance_perimeter_geometry(
+        self,
+        turn: Turn,
+        accounts: Sequence[tuple[str, int, int]],
+    ) -> tuple[Position, int, int, int]:
+        core = turn.core
+        assert core is not None
+        coordinator = self.alliance_coordinator
+        local_id = coordinator.account_id if coordinator is not None else "local"
+        core_positions = [(local_id, core.position)]
+        attacked_positions: list[Position] = []
+        if self._defense_broadcast(turn).under_attack:
+            attacked_positions.append(core.position)
+        if coordinator is not None:
+            for peer in self.alliance_peers:
+                if peer.account_id == local_id or peer.core_position is None:
+                    continue
+                core_positions.append((peer.account_id, peer.core_position))
+                if peer.defense is not None and peer.defense.under_attack:
+                    attacked_positions.append(peer.core_position)
+        positions = attacked_positions or [position for _, position in core_positions]
+        center = (
+            round(sum(position[0] for position in positions) / len(positions)),
+            round(sum(position[1] for position in positions) / len(positions)),
+        )
+        if attacked_positions:
+            radius = ALLIANCE_PERIMETER_RECALL_RADIUS
+        else:
+            spread = max(_distance(center, position) for _, position in core_positions)
+            radius = min(
+                ALLIANCE_PERIMETER_MAX_RADIUS,
+                max(
+                    ALLIANCE_PERIMETER_MIN_RADIUS,
+                    spread + ALLIANCE_PERIMETER_CORE_BUFFER,
+                ),
+            )
+        account_ids = [account_id for account_id, _, _ in accounts]
+        rank = account_ids.index(local_id)
+        return center, radius, rank, len(account_ids)
+
+    def _alliance_perimeter_orders(
+        self,
+        turn: Turn,
+        expedition: Mapping[str, object],
+        *,
+        claimed_ids: set[UUID],
+        guards: set[UUID],
+        units_by_id: Mapping[UUID, Movable],
+    ) -> tuple[dict[str, object], ...]:
+        expedition_id = int(expedition["id"])
+        accounts = self._alliance_combat_accounts(turn)
+        quota = self._alliance_perimeter_quota(accounts)
+        excluded = (
+            claimed_ids
+            | guards
+            | self.manual_claimed_unit_ids
+            | self.alliance_defense_ids
+            | self.healing_defender_ids
+            | self.core_raid_vanguard_ids
+            | self.core_raid_ranger_ids
+            | self.unit_hunt_vanguard_ids
+            | self.unit_hunt_ranger_ids
+        )
+        if self.beacon_runner_id is not None:
+            excluded.add(self.beacon_runner_id)
+        candidates = [
+            unit
+            for unit in units_by_id.values()
+            if unit.id not in excluded
+            and unit.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
+        ]
+        previous = self.alliance_perimeter_ids
+        candidates.sort(
+            key=lambda unit: (
+                0 if unit.id in previous else 1,
+                _uuid_sort_key(unit),
+            )
+        )
+        joint_vanguards = sum(vanguards for _, vanguards, _ in accounts)
+        joint_rangers = sum(rangers for _, _, rangers in accounts)
+        joint_combat = joint_vanguards + joint_rangers
+        desired_vanguards = (
+            round(quota * joint_vanguards / joint_combat) if joint_combat else 0
+        )
+        desired = {
+            UnitType.VANGUARD: desired_vanguards,
+            UnitType.RANGER: max(0, quota - desired_vanguards),
+        }
+        selected: list[Movable] = []
+        for unit_type in (UnitType.VANGUARD, UnitType.RANGER):
+            typed = [unit for unit in candidates if unit.unit_type is unit_type]
+            selected.extend(typed[: desired[unit_type]])
+        selected_ids = {unit.id for unit in selected}
+        if len(selected) < quota:
+            selected.extend(
+                unit
+                for unit in candidates
+                if unit.id not in selected_ids
+            )
+            selected = selected[:quota]
+        selected.sort(key=lambda unit: (unit.unit_type.value, _uuid_sort_key(unit)))
+        self.alliance_perimeter_ids = {unit.id for unit in selected}
+        self.expedition_members[expedition_id] = set(self.alliance_perimeter_ids)
+        claimed_ids.update(self.alliance_perimeter_ids)
+        if not selected:
+            self.alliance_perimeter_center = None
+            self.alliance_perimeter_radius = 0
+            return ()
+
+        center, radius, account_rank, account_count = self._alliance_perimeter_geometry(
+            turn,
+            accounts,
+        )
+        self.alliance_perimeter_center = center
+        self.alliance_perimeter_radius = radius
+        ring = _diamond_perimeter(center, radius)
+        sector_start = account_rank * len(ring) // account_count
+        sector_end = (account_rank + 1) * len(ring) // account_count
+        sector = ring[sector_start:sector_end] or ring
+        rotation = (turn.tick // ALLIANCE_PERIMETER_ROTATION_TICKS) % len(sector)
+        orders: list[dict[str, object]] = []
+        for index, unit in enumerate(selected):
+            slot = (rotation + index * len(sector) // len(selected)) % len(sector)
+            target = sector[slot]
+            orders.append(
+                {
+                    "id": -(1_000_000 + expedition_id * 1_000 + index),
+                    "preserve_combat": True,
+                    "unit_type": unit.unit_type.value,
+                    "unit_count": 1,
+                    "unit_ids": [str(unit.id)],
+                    "target_x": target[0],
+                    "target_y": target[1],
+                }
+            )
         return tuple(orders)
 
     def _beacon_campaign_ready(self, turn: Turn, target: object | None) -> bool:

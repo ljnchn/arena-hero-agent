@@ -493,7 +493,70 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(config["alliance"]["rally_enabled"])
             self.assertEqual(config["alliance"]["rally_radius"], 24)
             self.assertEqual(config["expeditions"][0]["name"], "strike-1")
+            self.assertEqual(config["expeditions"][0]["mode"], "TARGET")
             self.assertTrue(config["expeditions"][0]["enabled"])
+
+    def test_alliance_perimeter_expedition_mode_persists_and_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            saved = save_expedition(
+                path,
+                expedition_id=None,
+                name="shared perimeter",
+                ranger_count=1,
+                vanguard_count=1,
+                target=(0, 0),
+                enabled=True,
+                mode="alliance_perimeter",
+            )
+
+            self.assertEqual(saved["mode"], "ALLIANCE_PERIMETER")
+            self.assertEqual(
+                read_control_config(path)["expeditions"][0]["mode"],
+                "ALLIANCE_PERIMETER",
+            )
+            with self.assertRaisesRegex(ValueError, "mode"):
+                save_expedition(
+                    path,
+                    expedition_id=None,
+                    name="bad mode",
+                    ranger_count=1,
+                    vanguard_count=1,
+                    target=(0, 0),
+                    enabled=True,
+                    mode="wander",
+                )
+
+    def test_existing_expeditions_migrate_to_target_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE expeditions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        ranger_count INTEGER NOT NULL,
+                        vanguard_count INTEGER NOT NULL,
+                        target_x INTEGER NOT NULL,
+                        target_y INTEGER NOT NULL,
+                        enabled INTEGER NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO expeditions VALUES (1, 'legacy', 1, 2, 3, 4, 1, 0)"
+                )
+
+            config = read_control_config(path)
+
+            self.assertEqual(config["expeditions"][0]["mode"], "TARGET")
+            with sqlite3.connect(path) as connection:
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(expeditions)")
+                }
+            self.assertIn("mode", columns)
 
     def test_alliance_config_defaults_to_twelve_and_validates_range(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
